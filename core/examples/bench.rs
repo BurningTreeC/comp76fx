@@ -399,7 +399,7 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--presets") {
         println!("== what each built-in preset does to a -18 dBFS tone ==");
-        println!("  preset                 input  output      GR     net");
+        println!("  preset                 input  output      GR     net     THD");
         for name in ["Vocal 4:1", "All Buttons In", "Bass 8:1", "Drum Buss", "Room Crush", "Parallel Smash"] {
             let Some(dials) = comp76fx_core::presets::built_in_dials(name) else { continue };
             let dial = |id: &str| dials.iter().find(|(n, _)| *n == id).map(|(_, v)| *v as f64);
@@ -421,14 +421,25 @@ fn main() {
             for n in 0..(FS as usize * 3) { ch.process((amp * (w * n as f64).sin()) as f32); }
             let gr = ch.gain_reduction_db();
             let out = steady_db(c, -18.0);
-            println!("  {name:<22} {input:>5.0} {output:>7.0} {gr:>7.2} {:>7.2} dB", out + 18.0);
+            let thd = thd_rev(REV_D, c, -18.0);
+            println!("  {name:<22} {input:>5.0} {output:>7.0} {gr:>7.2} {:>7.2} dB {thd:>7.2} %", out + 18.0);
         }
         return;
     }
     if std::env::args().any(|a| a == "--allbutton") {
         // The preset as it ships: input 17, output -11, both dials fully
         // clockwise, all four switches in.
-        let preset = Controls { input_db: 17.0, output_db: -11.0, attack: 1.0, release: 1.0, buttons: [true; 4] };
+        // Read from the shipped preset rather than a copy of it, so this
+        // measures what people actually load.
+        let dials = comp76fx_core::presets::built_in_dials("All Buttons In").unwrap();
+        let dial = |id: &str| dials.iter().find(|(n, _)| *n == id).map(|(_, v)| *v as f64).unwrap();
+        let preset = Controls {
+            input_db: dial("input"),
+            output_db: dial("output"),
+            attack: dial("attack") / 7.0,
+            release: dial("release") / 7.0,
+            buttons: [true; 4],
+        };
         let four   = Controls { buttons: [true, false, false, false], ..preset };
         println!("== the All Buttons In preset, against 4:1 at the same settings ==");
         println!("  signal      all-in GR   4:1 GR    all-in THD   4:1 THD");

@@ -372,3 +372,50 @@ fn the_all_buttons_in_preset_really_is() {
         "the preset should be well into gain reduction, got {reduction:.1} dB"
     );
 }
+
+/// All-button mode has to stay the dirty one.
+///
+/// How dirty is a voicing decision and the constant behind it gets turned; the
+/// direction is not. This once ran *cleaner* than a plain 4:1 at the same
+/// settings, which is backwards, and nothing caught it.
+#[test]
+fn all_buttons_is_dirtier_than_a_plain_ratio() {
+    let distortion = |controls: Controls| {
+        let mut channel = Channel::new(REV_D, FS, 4, 1);
+        channel.set_controls(controls);
+        let amplitude = 10.0_f64.powf(-18.0 / 20.0);
+        let w = std::f64::consts::TAU * 1000.0 / FS;
+        for n in 0..(FS as usize * 2) {
+            channel.process((amplitude * (w * n as f64).sin()) as f32);
+        }
+        let window = FS as usize;
+        let mut samples = Vec::with_capacity(window);
+        for n in 0..window {
+            samples.push(channel.process((amplitude * (w * n as f64).sin()) as f32) as f64);
+        }
+        let bin = |harmonic: f64| {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (n, y) in samples.iter().enumerate() {
+                let phase = w * harmonic * n as f64;
+                re += y * phase.sin();
+                im += y * phase.cos();
+            }
+            (re * re + im * im).sqrt() / window as f64
+        };
+        let fundamental = bin(1.0);
+        let harmonics = (2..=6).map(|h| bin(h as f64).powi(2)).sum::<f64>().sqrt();
+        100.0 * harmonics / fundamental
+    };
+
+    let driven = Controls { input_db: 16.0, ..Controls::default() };
+    let all = distortion(Controls { buttons: [true; 4], ..driven });
+    let four = distortion(Controls { buttons: buttons(0), ..driven });
+    println!("at the same settings: all buttons in {all:.2} %, 4:1 {four:.2} %");
+
+    assert!(
+        all > four * 1.4,
+        "all-button mode should be plainly the dirtier one: {all:.2} % against {four:.2} %"
+    );
+    // And not so dirty that it has stopped being a compressor.
+    assert!(all < 6.0, "all-button mode at {all:.2} % is a fuzz box, not an 1176");
+}

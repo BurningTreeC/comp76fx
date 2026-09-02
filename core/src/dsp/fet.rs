@@ -38,9 +38,16 @@ const PINCH_PER_DB: f64 = 0.015;
 const DEPTH: f64 = 0.20;
 
 /// All-button mode drags the gate bias away from where the trimmer nulled it,
-/// so the channel modulates a good deal further for the same gain reduction.
-/// This is what makes the setting dirty rather than merely slow.
-const ALL_BUTTON_SHIFT: f64 = 3.2;
+/// so the channel modulates further for the same gain reduction. This is what
+/// makes the setting dirty rather than merely slow.
+///
+/// It is a shift, not a transformation. At 3.2 the mode passed three per cent
+/// distortion before it had 20 dB of reduction, which is more than the
+/// hardware does and much more than it takes to sound like the mode rather
+/// than like a fuzz. This is the one number to turn if it wants to be dirtier
+/// or cleaner; `all_buttons_is_dirtier_than_a_plain_ratio` keeps it honest in
+/// the direction that matters.
+const ALL_BUTTON_SHIFT: f64 = 1.8;
 
 pub struct Fet {
     /// How far this revision's trimmer leaves the channel from a null.

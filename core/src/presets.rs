@@ -44,8 +44,8 @@ const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
         // of every transient through before the gain collapses behind it.
         "All Buttons In",
         &[
-            ("input", 17.0),
-            ("output", 4.5),
+            ("input", 12.0),
+            ("output", 4.7),
             ("attack", 7.0),
             ("release", 7.0),
             ("ratio4", 1.0),
