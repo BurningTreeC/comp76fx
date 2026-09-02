@@ -35,33 +35,46 @@ not dialled in anywhere, it is what a feedback loop does.
   That is most of why the unit sounds the way it does when it is working hard.
 * **The recovery runs two stages together**, so it is program dependent rather
   than a fixed curve.
-* **The sidechain saturates smoothly** rather than clipping, because an
-  amplifier running out of rail bends over. Without that, every attack setting
-  collapses to the same time, and a hard limit would turn into an infinite
-  ratio the moment it was reached.
-* **All-button mode** puts a lag in the control path before the gain
-  collapses, which is the "reverse look-ahead" that lets the front of every
-  transient through, and shifts the timing and bias with it.
+* **The sidechain runs out of rail** rather than clipping, but only where a
+  real one would. At equilibrium the demand and the gain reduction are the
+  same number, so a curve that bends from the origin bends the static ratio
+  with it and every button reads low. It stays linear across the range the
+  unit works in and turns over only near the rail.
+* **All-button mode** opens the knee out instead of switching to another
+  ratio. The shifted bias leaves the sidechain with no definite point at which
+  it starts working, so the gain arrives over a range of level and the front of
+  a transient is through before much of it has. Because the detector is fed the
+  compressed output, the width of that knee sets the ratio as well as the
+  shape, which is why it lands between 12:1 and 20:1 and keeps climbing the
+  harder the unit is driven.
 
 Measured by the tests in `core/tests/compression.rs`:
 
 | | |
 | --- | --- |
-| 4:1 button | 3.98:1 |
-| 8:1 button | 7.83:1 |
-| 12:1 button | 11.66:1 |
-| 20:1 button | 19.27:1 |
-| all four in | 14.63:1 |
+| 4:1 button | 4.02:1 |
+| 8:1 button | 8.07:1 |
+| 12:1 button | 12.12:1 |
+| 20:1 button | 20.23:1 |
+| all four in | 15.5:1 driven, 13.1:1 gently |
 | no buttons in | exactly 1:1, colour with no gain reduction |
-| attack | 0.010 ms fastest to 0.250 ms slowest, closed loop |
-| release | 91 ms fastest to 1959 ms slowest |
-| distortion | Rev A −35.5 dB, Rev D −39.0 dB, Rev F −57.2 dB |
+| attack | 19.5 µs to 794 µs against a marked 20 µs to 800 µs |
+| release | 50.0 ms to 1100 ms against a marked 50 ms to 1.1 s |
+| distortion, idle at −18 dBFS | Rev A 0.48 %, Rev D 0.33 %, Rev F 0.05 % |
+| frequency response | within 0.53 dB across 20 Hz to 20 kHz |
+| signal to noise | 97 dB, 107 dB and 109 dB |
 
-The marked attack and release times, 20 µs to 800 µs and 50 ms to 1.1 s, are
-the detector's own time constants. The figures above are the closed loop
-behaviour, which is necessarily faster: the sidechain asks for far more
-reduction than the loop settles at, so the envelope passes 63 % of its
-settling point well before one time constant has elapsed.
+`core/tests/calibration.rs` holds the published figures to those tolerances,
+including the response at every sample rate and oversampling setting, and the
+meter's needle against the marks printed on its own face.
+
+Two of those are worth reading twice. All-button mode has no single ratio: its
+knee is wide enough that the slope is still opening out at light reduction, so
+the figure only means anything at a stated operating point, which is the same
+caveat the manual's own "somewhere between 12:1 and 20:1" carries. And the
+ratios sit about a percent high because the unit's own distortion takes energy
+out of the fundamental the measurement reads; the loop itself, linearised,
+lands a percent low, and the two nearly cancel.
 
 ## Controls
 
@@ -81,8 +94,14 @@ The strip above the panel is not on the hardware. It carries the preset drop
 down, a save button and the settings button, which holds the window scale
 (50 % to 200 %), the oversampling quality and the dry blend.
 
+Saved presets are one JSON file each, under a folder of the revision's own so
+the three do not share, and each carries a cross to delete it that asks before
+removing the file. A built-in preset has no file, so it cannot be deleted, and
+saving under its name writes a preset of your own beside it rather than
+replacing it in the list; replacing it would put it out of reach for good.
+
 Built-in presets include **All Buttons In**: all four switches in, both dials
-wide open, driven hard.
+wide open, driven hard, with the make-up set so it comes back at unity.
 
 ## Building
 
