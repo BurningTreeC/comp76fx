@@ -1,0 +1,22 @@
+[package]
+name = "comp76fx_rev_a"
+description = "Comp76Fx Rev A, a model of the A revision of the classic FET limiting amplifier"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# A host-less window for trying the panel out; not part of the plugin build.
+standalone = ["nih_plug/standalone"]
+
+[[bin]]
+name = "comp76fx_rev_a"
+required-features = ["standalone"]
+
+[dependencies]
+nih_plug.workspace = true
+comp76fx_core.workspace = true

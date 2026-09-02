@@ -1,0 +1,13 @@
+[package]
+name = "comp76fx_core"
+description = "Shared circuit model and front panel for the Comp76Fx limiting amplifiers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nih_plug.workspace = true
+nih_plug_vizia.workspace = true
+serde.workspace = true
+serde_json.workspace = true
