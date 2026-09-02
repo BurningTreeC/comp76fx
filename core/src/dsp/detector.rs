@@ -30,7 +30,7 @@ pub const RELEASE_SLOWEST: f64 = 1.1;
 
 /// The fixed operating point the input knob drives the signal against. The
 /// hardware has no threshold control; you set how hard you hit this instead.
-const THRESHOLD_DB: f64 = -24.0;
+pub const THRESHOLD_DB: f64 = -24.0;
 
 /// Where the sidechain amplifier begins to run out of rail, and the most it
 /// can ask for however hard it is driven. Both in dB of gain reduction.
@@ -69,6 +69,11 @@ pub struct Timing {
     pub k: f64,
     pub attack: f64,
     pub release: f64,
+    /// Where the sidechain starts working, in dBFS. Fixed on the hardware,
+    /// except that all-button mode moves it: four ratio resistors in parallel
+    /// is more sidechain gain than any one of them, and the bias shift has the
+    /// FET part way on before the signal arrives.
+    pub threshold: f64,
     /// Width of the knee, in dB. Zero everywhere except all-button mode,
     /// where the shifted bias makes the sidechain come on gradually instead
     /// of at a definite point, which is what lets the leading edge of a
@@ -96,6 +101,7 @@ impl Detector {
                 k: 3.0,
                 attack: ATTACK_FASTEST,
                 release: RELEASE_FASTEST,
+                threshold: THRESHOLD_DB,
                 knee: 0.0,
             },
             attack_coef: 0.0,
@@ -139,7 +145,7 @@ impl Detector {
         // Just the sidechain's own gain. Dividing by `1 + k` here as well
         // would apply the ratio twice, since closing the loop around the gain
         // element is what produces that term.
-        let over = knee(level_db - THRESHOLD_DB, self.timing.knee);
+        let over = knee(level_db - self.timing.threshold, self.timing.knee);
         let demand = limit_demand(over * self.timing.k);
 
         // Charging is one time constant, recovery is two running together.

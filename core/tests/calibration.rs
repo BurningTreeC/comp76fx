@@ -19,6 +19,7 @@ fn release_time(marked: f64) -> f64 {
         k: 3.0,
         attack: detector::ATTACK_FASTEST,
         release: marked,
+        threshold: detector::THRESHOLD_DB,
         knee: 0.0,
     });
     let level = 10f64.powf(-6.0 / 20.0);
@@ -64,7 +65,8 @@ fn the_attack_dial_means_what_it_says() {
             k: 3.0,
             attack: marked,
             release: detector::RELEASE_FASTEST,
-            knee: 0.0,
+            threshold: detector::THRESHOLD_DB,
+        knee: 0.0,
         });
         let level = 10f64.powf(-6.0 / 20.0);
         let mut settled = 0.0;

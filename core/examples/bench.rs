@@ -201,6 +201,7 @@ fn detector_times(knob_attack: f64, knob_release: f64) -> (f64, f64) {
         k: 3.0,
         attack: detector::knob_to_time(knob_attack, detector::ATTACK_FASTEST, detector::ATTACK_SLOWEST),
         release: detector::knob_to_time(knob_release, detector::RELEASE_FASTEST, detector::RELEASE_SLOWEST),
+        threshold: detector::THRESHOLD_DB,
         knee: 0.0,
     });
     // A steady level well above the operating point.
@@ -395,6 +396,81 @@ fn main() {
         }
 
         println!("\n  {} line(s) off specification", fails);
+        return;
+    }
+    if std::env::args().any(|a| a == "--combos") {
+        println!("== every combination, driven the same, at -18 dBFS ==");
+        println!("  buttons in            k    GR      THD     slope");
+        let names = ["4", "8", "12", "20"];
+        let mut sets: Vec<[bool; 4]> = Vec::new();
+        for mask in 1u8..16 {
+            let mut b = [false; 4];
+            for (i, slot) in b.iter_mut().enumerate() { *slot = mask & (1 << i) != 0; }
+            sets.push(b);
+        }
+        sets.sort_by_key(|b| (b.iter().filter(|x| **x).count(), b.iter().position(|x| *x).unwrap()));
+        for b in sets {
+            let label: Vec<&str> = names.iter().zip(b).filter(|(_, p)| *p).map(|(n, _)| *n).collect();
+            let c = Controls { input_db: 12.0, output_db: 0.0, attack: 0.5, release: 0.5, buttons: b };
+            let mut ch = Channel::new(REV_D, FS, 4, 1);
+            ch.set_controls(c);
+            let amp = 10f64.powf(-18.0 / 20.0);
+            let w = std::f64::consts::TAU * 1000.0 / FS;
+            for n in 0..(FS as usize * 3) { ch.process((amp * (w * n as f64).sin()) as f32); }
+            let lo = steady_db(c, -30.0);
+            let hi = steady_db(c, -20.0);
+            println!("  {:<18} {:>5.0} {:>6.2} dB {:>7.3} % {:>7.2}:1",
+                label.join("+"), c.sidechain_gain().unwrap_or(0.0),
+                ch.gain_reduction_db(), thd_rev(REV_D, c, -18.0), 10.0 / (hi - lo));
+        }
+        return;
+    }
+    if std::env::args().any(|a| a == "--vs20") {
+        println!("== all four in against 20:1, identical settings ==");
+        println!("  signal      all-in GR   20:1 GR    all-in THD   20:1 THD");
+        let all = |drive: f64| Controls { input_db: drive, output_db: 0.0, attack: 0.5, release: 0.5, buttons: [true; 4] };
+        let twenty = |drive: f64| Controls { buttons: buttons(3), ..all(drive) };
+        for lvl in [-36.0, -30.0, -24.0, -18.0, -12.0] {
+            let a = all(12.0);
+            let t = twenty(12.0);
+            let mut ca = Channel::new(REV_D, FS, 4, 1);
+            ca.set_controls(a);
+            let mut ct = Channel::new(REV_D, FS, 4, 1);
+            ct.set_controls(t);
+            let amp = 10f64.powf(lvl / 20.0);
+            let w = std::f64::consts::TAU * 1000.0 / FS;
+            for n in 0..(FS as usize * 3) {
+                let x = (amp * (w * n as f64).sin()) as f32;
+                ca.process(x); ct.process(x);
+            }
+            println!("  {lvl:>5.0} dBFS   {:>7.2} dB {:>8.2} dB   {:>8.3} % {:>8.3} %",
+                ca.gain_reduction_db(), ct.gain_reduction_db(),
+                thd_rev(REV_D, a, lvl), thd_rev(REV_D, t, lvl));
+        }
+        println!("\n== how fast each grabs: gain reduction over the first 20 ms, -18 dBFS ==");
+        for (label, c) in [("all four in", all(12.0)), ("20:1", twenty(12.0))] {
+            let mut ch = Channel::new(REV_D, FS, 4, 1);
+            ch.set_controls(c);
+            let amp = 10f64.powf(-18.0 / 20.0);
+            let w = std::f64::consts::TAU * 1000.0 / FS;
+            for _ in 0..(FS as usize / 10) { ch.process(0.0); }
+            print!("  {label:<12}");
+            for probe in [0.0005, 0.002, 0.005, 0.010, 0.020] {
+                print!("  {probe:.3}s");
+            }
+            println!();
+            let mut ch = Channel::new(REV_D, FS, 4, 1);
+            ch.set_controls(c);
+            for _ in 0..(FS as usize / 10) { ch.process(0.0); }
+            print!("              ");
+            let mut i = 0usize;
+            for probe in [0.0005, 0.002, 0.005, 0.010, 0.020] {
+                let target = (FS * probe) as usize;
+                while i < target { ch.process((amp * (w * i as f64).sin()) as f32); i += 1; }
+                print!("  {:>6.2}dB", ch.gain_reduction_db());
+            }
+            println!();
+        }
         return;
     }
     if std::env::args().any(|a| a == "--presets") {

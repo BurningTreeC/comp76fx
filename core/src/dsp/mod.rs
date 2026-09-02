@@ -16,24 +16,31 @@ pub use oversample::Oversampler;
 /// Ratios the four front panel buttons select.
 pub const RATIOS: [f64; 4] = [4.0, 8.0, 12.0, 20.0];
 
-/// What all four buttons at once comes to. The manual puts it "somewhere
-/// between 12:1 and 20:1", and the bias shift takes the timing with it.
-const ALL_BUTTON_RATIO: f64 = 15.0;
-/// How wide the knee opens out in all-button mode. The shifted bias leaves the
-/// sidechain without a definite point at which it starts working, so the gain
-/// comes down over a range of level rather than at a threshold, and the front
-/// of a transient is through before much of it has arrived.
+/// What pressing more than one ratio button does.
 ///
-/// The width sets the ratio as well as the shape, because the detector is fed
-/// the compressed output and so only ever sits a little above the operating
-/// point, by about the reduction divided by the sidechain gain, which is
-/// inside the knee at any setting. Working the loop through, the slope comes
-/// out as `1 + k (u + w / 2) / w`, so a wide knee is not merely soft, it is a
-/// lower ratio: 14 dB of it measured 5.7:1. Three puts it at about 14.5:1, inside
-/// the "between 12:1 and 20:1" the manual claims, and leaves the ratio
-/// climbing with how hard the unit is driven, which is the part that makes
-/// the mode grab harder the more you feed it.
-const ALL_BUTTON_KNEE: f64 = 3.0;
+/// Each button switches its own resistor into the sidechain, so pressing
+/// several puts them in parallel and their conductances add: the loop gain
+/// goes up, not to whichever button is highest. Treating the highest as the
+/// winner made every combination identical to one of its members, which is
+/// why two and three buttons did nothing at all and why all four needed
+/// special casing to be interesting.
+///
+/// Three things then follow from how many are in, and all four falls out as
+/// the far end of them rather than as a mode of its own:
+///
+/// * the bias shifts, dragging the operating point down, so the unit is
+///   already working where one button would still be waiting;
+/// * the knee opens out, so the gain arrives over a range of level rather
+///   than at a point -- and because the detector is fed the compressed
+///   output, that width is what pulls the measured slope back down into the
+///   "somewhere between 12:1 and 20:1" the manual claims for all four; and
+/// * the gate is dragged away from where the trimmer nulled it, so the gain
+///   element bends the signal further.
+///
+/// Each is scaled by how many buttons are in beyond the first.
+const COMBINED_THRESHOLD_DB: f64 = 11.0;
+const COMBINED_KNEE_DB: f64 = 9.0;
+const COMBINED_FET_SHIFT: f64 = 6.0;
 /// All-button mode slows the attack and speeds the recovery.
 const ALL_BUTTON_ATTACK: f64 = 6.0;
 const ALL_BUTTON_RELEASE: f64 = 0.55;
@@ -112,22 +119,33 @@ impl Controls {
         self.buttons.iter().all(|pressed| *pressed)
     }
 
-    /// The ratio the sidechain is set to, or `None` when no button is in and
-    /// the gain element is out of circuit.
-    pub fn ratio(&self) -> Option<f64> {
-        if self.all_buttons() {
-            return Some(ALL_BUTTON_RATIO);
-        }
-        // With more than one button in, the highest wins, as the buttons are
-        // switching one network between taps.
-        RATIOS
+    /// How many ratio buttons are in.
+    pub fn pressed(&self) -> usize {
+        self.buttons.iter().filter(|p| **p).count()
+    }
+
+    /// Sidechain gain, which is the ratio less one. `None` when no button is
+    /// in and the gain element is out of circuit.
+    ///
+    /// The buttons' resistors sit in parallel, so their conductances add.
+    pub fn sidechain_gain(&self) -> Option<f64> {
+        let total: f64 = RATIOS
             .iter()
             .zip(self.buttons)
             .filter(|(_, pressed)| *pressed)
-            .map(|(ratio, _)| *ratio)
-            .fold(None, |best: Option<f64>, ratio| {
-                Some(best.map_or(ratio, |b| b.max(ratio)))
-            })
+            .map(|(ratio, _)| ratio - 1.0)
+            .sum();
+        (total > 0.0).then_some(total)
+    }
+
+    /// The ratio the loop settles at before the knee is taken into account.
+    pub fn ratio(&self) -> Option<f64> {
+        self.sidechain_gain().map(|k| k + 1.0)
+    }
+
+    /// How far past a single button this combination sits, from zero to one.
+    fn combination(&self) -> f64 {
+        (self.pressed().saturating_sub(1)) as f64 / (RATIOS.len() - 1) as f64
     }
 }
 
@@ -201,14 +219,16 @@ impl Channel {
 
     fn apply_controls(&mut self) {
         let all = self.controls.all_buttons();
+        let blend = self.controls.combination();
         let ratio = self
             .controls
-            .ratio()
-            .map(|r| ((r - 1.0) * self.revision.ratio_accuracy).max(0.0))
+            .sidechain_gain()
+            .map(|k| (k * self.revision.ratio_accuracy).max(0.0))
             .unwrap_or(0.0);
 
-        // The bias shift is what makes all-button mode dirty as well as slow.
-        self.fet.set_all_buttons(all);
+        // The bias shift is what makes a combination dirty as well as slow,
+        // and it grows with how many buttons are in.
+        self.fet.set_bias_shift(1.0 + (COMBINED_FET_SHIFT - 1.0) * blend);
 
         let (attack_scale, release_scale) = if all {
             (ALL_BUTTON_ATTACK, ALL_BUTTON_RELEASE)
@@ -228,7 +248,8 @@ impl Channel {
                 detector::RELEASE_FASTEST,
                 detector::RELEASE_SLOWEST,
             ) * release_scale,
-            knee: if all { ALL_BUTTON_KNEE } else { 0.0 },
+            threshold: detector::THRESHOLD_DB - COMBINED_THRESHOLD_DB * blend,
+            knee: COMBINED_KNEE_DB * blend,
         });
     }
 
