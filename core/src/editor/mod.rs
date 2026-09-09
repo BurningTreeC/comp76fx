@@ -261,9 +261,20 @@ fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, me
     }
 
     // --- nameplate ----------------------------------------------------------
-    plate(cx, ink, "COMP76FX", 100.0, 28.0, 14.0);
-    plate(cx, ink, "PEAK LIMITER", 100.0, 47.0, 9.0);
-    plate(cx, ink, revision.name, 100.0, 65.0, 10.0);
+    plate(cx, ink, "COMP76FX", 100.0, 26.0, 14.0);
+    // The version, under the name. Small and in the relief ink like the rest
+    // of the plate: it is there to be quoted when reporting a fault, not read
+    // every session.
+    plate(
+        cx,
+        ink,
+        concat!("V", env!("CARGO_PKG_VERSION")),
+        100.0,
+        40.0,
+        7.5,
+    );
+    plate(cx, ink, "PEAK LIMITER", 100.0, 54.0, 9.0);
+    plate(cx, ink, revision.name, 100.0, 71.0, 10.0);
     plate(cx, ink, "BURNINGTREEC", 100.0, 246.0, 8.0);
 }
 
