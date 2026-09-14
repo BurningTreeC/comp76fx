@@ -152,9 +152,3 @@ python3 tools/third-party-notices.py
 | `core/src/presets.rs` | built-in and saved presets |
 | `rev_a`, `rev_d`, `rev_f` | one identity each; the circuit differences live in `Revision` |
 | `core/tests/compression.rs` | the measurements above |
-
-On macOS, `cargo xtask bundle-au --all --release` also builds self-contained
-AUv2 components and AUv3 containing apps for this workspace, using ad-hoc
-signing without an Apple Developer account. See
-[macOS Audio Units](docs/MACOS_AUDIO_UNITS.md) for build, installation,
-validation and the current macOS testing status.
