@@ -50,8 +50,6 @@ def run(args, *, cwd=ROOT, env=None, log=None, check=True, timeout=None, quiet=F
 
 
 def apple_version(version):
-    # Do not silently clamp bytes (upstream AU component versions use 8-bit parts),
-    # or collapse prereleases into releases with identical compatibility versions.
     require(re.fullmatch(r"\d+\.\d+\.\d+", version), f"Release version needs three numeric parts: {version}")
     require(all(int(n) <= 255 for n in version.split(".")), f"AU version part exceeds 255: {version}")
     return version
@@ -71,7 +69,6 @@ def catalog():
 
 def plan(packages, all_plugins, root=ROOT):
     config = catalog()
-    # cargo metadata handles workspace-inherited versions, custom target dirs, etc.
     metadata = json.loads(run(["cargo", "metadata", "--no-deps", "--format-version=1", "--offline"], cwd=root, quiet=True).stdout)
     members = {p["name"]: p for p in metadata["packages"] if p["id"] in metadata["workspace_members"]}
     available = [p for p in config["plugins"] if p["package"] in members]
@@ -112,7 +109,6 @@ def digest(path):
 
 
 def sign(bundle):
-    # Leaf CLAP -> extension -> app. Never use --deep to *sign* code.
     nested = [p for p in bundle.rglob("*") if p.is_dir() and p.suffix in (".clap", ".appex", ".framework", ".app")]
     for item in sorted(nested, key=lambda p: len(p.parts), reverse=True) + [bundle]:
         args = ["codesign", "--force", "--sign", "-"]
@@ -140,8 +136,6 @@ def verify_architecture(binary, expected):
     require(actual == set(expected), f"Architecture mismatch in {binary}: {actual} != {expected}")
     run(["file", binary])
     run(["otool", "-L", binary])
-    # -L also lists LC_ID_DYLIB (the Rust cdylib's own install name). Only load
-    # commands are dependencies. Inspect both universal slices, ignoring ID.
     commands = run(["otool", "-l", binary], quiet=True).stdout
     verify_load_commands(commands, binary)
 
@@ -244,7 +238,6 @@ def build(args):
     manifest_file = work / "build-manifest.json"
     manifest_file.write_text(json.dumps(manifest, indent=2) + "\n")
     dist = args.dist.resolve()
-    # A new build gets a new manifest; do not accidentally publish an old AUv3.
     for p in manifest["plugins"]:
         base = dist / p["package"]
         if base.exists():
@@ -257,7 +250,7 @@ def build(args):
     for kind in manifest["formats"]:
         build_dir = work / kind / (args.arch + "-" + config.lower())
         run(["cmake", "-S", HERE, "-B", build_dir, "-G", "Xcode",
-             f"-DAU_MANIFEST={manifest_file}", f"-DAU_FORMAT={kind}",
+             f"-DAU_MANIFEST={manifest_file}", f"-DAU_FORMAT={kind}", f"-DAU_BUILD_CONFIG={config}",
              "-DCMAKE_OSX_ARCHITECTURES=" + ";".join(manifest["architectures"])],
             env=env, log=logs / (kind + "-configure.log"))
         run(["cmake", "--build", build_dir, "--config", config, "--", "CODE_SIGN_IDENTITY=-",
@@ -270,8 +263,6 @@ def build(args):
                 dest /= "auv3"
             dest /= p["name"] + suffix
             copy_bundle(build_dir / "products" / config / dest.name, dest)
-            # Upstream's AUv3 helper has a literal 10.13 minimum. Normalize only
-            # the staged bundle, before final signing, never Xcode's plist input.
             for bundle in [dest] + list(dest.rglob("*.appex")):
                 info = read_plist(bundle)
                 info["LSMinimumSystemVersion"] = manifest["deployment_target"]
@@ -281,8 +272,6 @@ def build(args):
         partial = dict(manifest, formats=manifest["formats"][:manifest["formats"].index(kind) + 1])
         (dist / "manifest.json").write_text(json.dumps(partial, indent=2) + "\n")
         verify(dist, partial)
-    # Carry licenses for everything linked by the wrapper; SDKs are fetched
-    # separately for AUv2/AUv3, so each relevant source is available here.
     licenses = dist / "licenses"
     licenses.mkdir(exist_ok=True)
     for name in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
@@ -311,8 +300,6 @@ def install(dist, manifest, kind):
             dest = home / "Applications" / src.name
             copy_bundle(src, dest)
             verify_signature(dest)
-            # Registration is tested separately, so build/install alone cannot
-            # be mistaken for a successfully loaded AUv3.
             print(f"Containing app installed: {dest}; run the register command next.")
 
 
@@ -327,7 +314,6 @@ def register(manifest, logs):
                                ("pluginkit-add", ["pluginkit", "-a", extension])):
             records.append(run(command, log=logs / (p["package"] + "-" + label + ".log"), check=False).returncode)
         identifier = p["bundle_id"] + ".auv3.extension"
-        # LaunchServices discovery can be asynchronous. Bounded retry, no cache deletion.
         found = False
         for _ in range(10):
             result = run(["pluginkit", "-m", "-v", "-i", identifier],
@@ -345,8 +331,6 @@ def register(manifest, logs):
 def validate(manifest, logs):
     results = {}
     for p in manifest["plugins"]:
-        # With both formats installed auval may choose either for the shared
-        # component tuple. The separate probe selects and reports the AU version.
         result = run(["auval", "-v", p["type"], p["subtype"], p["manufacturer"]],
                      log=logs / (p["package"] + "-auval.log"), check=False, timeout=300)
         results[p["package"]] = {"auval_exit": result.returncode}
