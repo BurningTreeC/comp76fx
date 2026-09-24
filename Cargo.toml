@@ -4,7 +4,7 @@ members = ["core", "installer", "rev_a", "rev_d", "rev_f", "xtask"]
 exclude = ["vendor/baseview"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.10.0"
 edition = "2021"
 authors = ["Simon Huber <huber.simon@protonmail.com>"]
 license = "GPL-3.0-or-later"
