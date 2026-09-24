@@ -33,6 +33,10 @@ cargo clippy --release --workspace --all-targets -- -D warnings
 # Bench: prints ratio, attack, release, knee and THD against the published spec
 cargo run --release -p comp76fx_core --example bench
 
+# Screenshot one revision's standalone panel (Hyprland: hyprctl, grim, magick). Output, DPI scale, revision a|d|f.
+# Builds the standalone first; the panel pictures stay sharp up to about 2x. doc/panel.png is Rev D at 1.5.
+./shot.sh doc/panel.png 1.5 d
+
 # Regenerate after any dependency change. CI fails if the output differs from the committed file.
 python3 tools/third-party-notices.py
 
