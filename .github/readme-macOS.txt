@@ -3,7 +3,7 @@ Comp76Fx
 
 The easy way
 ------------
-Double-click Install.command. It copies both plugins into place and clears the
+Double-click Install.command. It copies all three plugins into place and clears the
 macOS quarantine flag described below.
 
 The first time, macOS will refuse to run it because it came from the internet.

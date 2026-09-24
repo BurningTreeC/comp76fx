@@ -6,31 +6,10 @@
 //! three copies that drift apart.
 
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-/// What the front panel meter is fed, written by the audio thread and read by
-/// the editor. Both are stored in hundredths of a dB so they fit an atomic.
-#[derive(Default)]
-pub struct Meters {
-    /// Gain reduction, always positive.
-    pub reduction: AtomicU32,
-    /// Output level below full scale, as a positive number of dB down.
-    pub output: AtomicU32,
-}
-
-impl Meters {
-    pub fn reduction_db(&self) -> f32 {
-        self.reduction.load(Ordering::Relaxed) as f32 / 100.0
-    }
-
-    /// Output level in dBFS, so negative.
-    pub fn output_db(&self) -> f32 {
-        -(self.output.load(Ordering::Relaxed) as f32 / 100.0)
-    }
-}
-
-use crate::dsp::{Channel, Revision};
+use crate::dsp::{Channel, Controls, Delay, Revision};
+use crate::meters::Meters;
 use crate::params::{Comp76Params, Oversampling};
 
 /// Controls are refreshed at this granularity rather than per sample.
@@ -38,15 +17,81 @@ const CONTROL_BLOCK: usize = 32;
 
 /// Latency the plugin always reports, whatever the oversampling setting is,
 /// so that changing quality never renegotiates it while the host is running.
-pub const LATENCY: u32 = 74;
+/// Every channel is padded out to it, and the dry signal held back by it.
+pub const LATENCY: u32 = crate::dsp::LATENCY;
+
+/// One channel as the host sees it: the circuit, and the dry signal held back
+/// to line up with it.
+///
+/// The circuit takes [`LATENCY`] samples to come out the other side, so a dry
+/// signal blended in straight from the input arrived that much early and
+/// combed against the wet one: with the blend at half and nothing being
+/// compressed, 1 kHz came out 60 dB down at the default oversampling.
+pub struct Strip {
+    channel: Channel,
+    dry: Delay,
+}
+
+impl Strip {
+    pub fn new(revision: Revision, sample_rate: f64, factor: usize, seed: u32) -> Self {
+        Self {
+            channel: Channel::new(revision, sample_rate, factor, seed),
+            dry: Delay::new(LATENCY as usize, LATENCY as usize),
+        }
+    }
+
+    pub fn set_controls(&mut self, controls: Controls) {
+        self.channel.set_controls(controls);
+    }
+
+    pub fn set_oversampling(&mut self, factor: usize) {
+        self.channel.set_oversampling(factor);
+    }
+
+    /// One sample. `mix` is the share of the circuit in the output, from `0.0`
+    /// to `1.0`. With the power off the unit is out of circuit and what comes
+    /// out is the dry signal alone -- still held back, so switching it does
+    /// not move the track in time against the rest of the session.
+    #[inline]
+    pub fn process(&mut self, sample: f32, mix: f32, powered: bool) -> f32 {
+        let dry = self.dry.process(sample as f64) as f32;
+        if !powered {
+            return dry;
+        }
+        let wet = self.channel.process(sample);
+        dry * (1.0 - mix) + wet * mix
+    }
+
+    /// Clears the circuit and leaves the dry signal running, as the power
+    /// switch does.
+    pub fn switch_off(&mut self) {
+        self.channel.reset();
+    }
+
+    pub fn reset(&mut self) {
+        self.channel.reset();
+        self.dry.reset();
+    }
+
+    /// Gain reduction to show on the meter, in dB, and resets the peak hold.
+    pub fn take_meter(&mut self) -> f32 {
+        self.channel.take_meter()
+    }
+}
 
 /// Shared state of a Comp76Fx plugin.
 pub struct Comp76 {
     pub params: Arc<Comp76Params>,
     revision: Revision,
-    channels: Vec<Channel>,
+    strips: Vec<Strip>,
+    /// Output energy per channel over the current buffer, for the meter.
+    /// Allocated with the strips so the audio thread never has to.
+    energy: Vec<f64>,
     sample_rate: f32,
     oversampling: Oversampling,
+    /// Whether the power was on for the last buffer, so switching it off
+    /// clears the circuit once rather than on every buffer.
+    powered: bool,
     meters: Arc<Meters>,
 }
 
@@ -55,9 +100,11 @@ impl Comp76 {
         Self {
             params,
             revision,
-            channels: Vec::new(),
+            strips: Vec::new(),
+            energy: Vec::new(),
             sample_rate: 44100.0,
             oversampling: Oversampling::X4,
+            powered: true,
             meters: Arc::new(Meters::default()),
         }
     }
@@ -73,41 +120,43 @@ impl Comp76 {
     pub fn initialize(&mut self, channels: usize, sample_rate: f32) {
         self.sample_rate = sample_rate;
         self.oversampling = self.params.oversampling.value();
-        self.channels.clear();
-        self.channels.reserve(channels);
-        for index in 0..channels {
-            self.channels.push(Channel::new(
-                self.revision,
-                sample_rate as f64,
-                self.oversampling.factor(),
-                0x9e37_79b9_u32.wrapping_add(index as u32 * 0x85eb_ca6b),
-            ));
-        }
+        self.strips = (0..channels)
+            .map(|index| {
+                Strip::new(
+                    self.revision,
+                    sample_rate as f64,
+                    self.oversampling.factor(),
+                    0x9e37_79b9_u32.wrapping_add(index as u32 * 0x85eb_ca6b),
+                )
+            })
+            .collect();
+        self.energy = vec![0.0; channels];
     }
 
     pub fn reset(&mut self) {
-        self.channels.iter_mut().for_each(Channel::reset);
-        self.meters.reduction.store(0, Ordering::Relaxed);
-        self.meters.output.store(9999, Ordering::Relaxed);
+        self.strips.iter_mut().for_each(Strip::reset);
+        self.meters.clear();
     }
 
     pub fn process(&mut self, buffer: &mut Buffer) {
         let oversampling = self.params.oversampling.value();
         if oversampling != self.oversampling {
             self.oversampling = oversampling;
-            for channel in self.channels.iter_mut() {
-                channel.set_oversampling(oversampling.factor());
+            for strip in self.strips.iter_mut() {
+                strip.set_oversampling(oversampling.factor());
             }
         }
 
-        // With the power off the unit is out of circuit entirely.
-        if !self.params.power.value() {
-            self.reset();
-            return;
+        let powered = self.params.power.value();
+        if !powered && self.powered {
+            self.strips.iter_mut().for_each(Strip::switch_off);
         }
+        self.powered = powered;
 
-        let mut peak = 0.0f32;
+        self.energy.iter_mut().for_each(|energy| *energy = 0.0);
         for (_, mut block) in buffer.iter_blocks(CONTROL_BLOCK) {
+            // The smoothers run whatever the power switch says, so a control
+            // turned while it was off is where it was left when it comes on.
             let steps = block.samples() as u32;
             let controls = self.params.controls(
                 self.params.input.smoothed.next_step(steps),
@@ -117,37 +166,33 @@ impl Comp76 {
             );
             let mix = self.params.mix.smoothed.next_step(steps) / 100.0;
 
-            for channel in self.channels.iter_mut() {
-                channel.set_controls(controls);
-            }
-
             for (index, samples) in block.iter_mut().enumerate() {
-                let Some(channel) = self.channels.get_mut(index) else {
+                let (Some(strip), Some(energy)) =
+                    (self.strips.get_mut(index), self.energy.get_mut(index))
+                else {
                     continue;
                 };
+                strip.set_controls(controls);
                 for sample in samples.iter_mut() {
-                    let wet = channel.process(*sample);
-                    let out = *sample * (1.0 - mix) + wet * mix;
+                    let out = strip.process(*sample, mix, powered);
                     *sample = out;
-                    peak = peak.max(out.abs());
+                    *energy += out as f64 * out as f64;
                 }
             }
         }
 
-        // The meter shows the deepest reduction any channel reached.
-        let reduction = self
-            .channels
-            .iter_mut()
-            .map(Channel::take_meter)
-            .fold(0.0f32, f32::max);
-        self.meters
-            .reduction
-            .store((reduction * 100.0) as u32, Ordering::Relaxed);
-        // Stored as dB down so it stays a positive number.
-        let output_db = 20.0 * (peak + 1e-9).log10();
-        self.meters
-            .output
-            .store((-output_db * 100.0).clamp(0.0, 99999.0) as u32, Ordering::Relaxed);
+        if powered {
+            // The meter shows the deepest reduction any channel reached, and
+            // the level of the loudest one.
+            let reduction = self
+                .strips
+                .iter_mut()
+                .map(Strip::take_meter)
+                .fold(0.0f32, f32::max);
+            let loudest = self.energy.iter().copied().fold(0.0f64, f64::max);
+            self.meters
+                .publish(reduction, loudest as f32, buffer.samples() as u32);
+        }
     }
 }
 
@@ -252,7 +297,8 @@ macro_rules! export_revision {
         impl ::nih_plug::prelude::ClapPlugin for Plugin76 {
             const CLAP_ID: &'static str = $clap_id;
             const CLAP_DESCRIPTION: Option<&'static str> = Some($description);
-            const CLAP_MANUAL_URL: Option<&'static str> = Some(<Self as ::nih_plug::prelude::Plugin>::URL);
+            const CLAP_MANUAL_URL: Option<&'static str> =
+                Some(<Self as ::nih_plug::prelude::Plugin>::URL);
             const CLAP_SUPPORT_URL: Option<&'static str> = None;
             const CLAP_FEATURES: &'static [::nih_plug::prelude::ClapFeature] = &[
                 ::nih_plug::prelude::ClapFeature::AudioEffect,

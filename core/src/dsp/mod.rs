@@ -4,14 +4,25 @@
 //! them expressed as a [`Revision`] rather than as separate code.
 
 pub mod amp;
+pub mod delay;
 pub mod detector;
 pub mod fet;
 pub mod oversample;
+pub mod revisions;
 
 pub use amp::{Amplifier, OutputStage};
+pub use delay::Delay;
 pub use detector::{Detector, Timing};
 pub use fet::Fet;
 pub use oversample::Oversampler;
+pub use revisions::{REV_A, REV_D, REV_F};
+
+/// Latency every channel has, in samples at the host rate, whatever the
+/// oversampling is set to: the longest the oversampler can take, with the
+/// difference made up by a plain delay. The host is told this once, so
+/// changing the quality never shifts the track against the rest of the
+/// session, and the dry signal can be held back by the same amount.
+pub const LATENCY: u32 = oversample::MAX_LATENCY;
 
 /// Ratios the four front panel buttons select.
 pub const RATIOS: [f64; 4] = [4.0, 8.0, 12.0, 20.0];
@@ -45,7 +56,8 @@ const COMBINED_FET_SHIFT: f64 = 6.0;
 const ALL_BUTTON_ATTACK: f64 = 6.0;
 const ALL_BUTTON_RELEASE: f64 = 0.55;
 
-/// What separates one revision from another.
+/// What separates one revision from another. The three that ship are in
+/// [`revisions`].
 #[derive(Clone, Copy)]
 pub struct Revision {
     /// Shown on the panel, for example "Rev A".
@@ -70,6 +82,17 @@ pub struct Revision {
     /// Ratio the sidechain actually reaches, as a fraction of the marked
     /// value. The early units do not quite hit their marks.
     pub ratio_accuracy: f64,
+}
+
+impl Revision {
+    /// The same circuit with its noise switched off, so a measurement reads
+    /// the circuit rather than the noise floor.
+    pub const fn without_noise(self) -> Self {
+        Self {
+            noise_floor_db: -400.0,
+            ..self
+        }
+    }
 }
 
 /// The faceplate a revision was built with. The units were not restyled on
@@ -164,6 +187,13 @@ pub struct Channel {
     meter_db: f64,
     /// A very small amount of noise, seeded per channel.
     noise: u32,
+    /// Makes the oversampler's latency up to [`LATENCY`] at every setting.
+    pad: Delay,
+    /// Gains the controls and the oversampling set, worked out when they
+    /// change rather than on every sample.
+    input_gain: f64,
+    output_gain: f64,
+    noise_gain: f64,
 }
 
 impl Channel {
@@ -181,16 +211,19 @@ impl Channel {
             reduction_db: 0.0,
             meter_db: 0.0,
             noise: seed | 1,
+            pad: Delay::new(0, LATENCY as usize),
+            input_gain: 1.0,
+            output_gain: 1.0,
+            noise_gain: 0.0,
         };
+        channel.retune();
         channel.apply_controls();
         channel
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
-        let internal = sample_rate * self.oversampler.factor() as f64;
-        self.detector.set_sample_rate(internal);
-        self.amp.set_sample_rate(internal);
+        self.retune();
         self.reset();
     }
 
@@ -199,14 +232,28 @@ impl Channel {
             return;
         }
         self.oversampler.set_factor(factor);
-        let internal = self.sample_rate * self.oversampler.factor() as f64;
-        self.detector.set_sample_rate(internal);
-        self.amp.set_sample_rate(internal);
+        self.retune();
         self.reset();
     }
 
+    /// Everything that follows from the rate the circuit runs at.
+    fn retune(&mut self) {
+        let factor = self.oversampler.factor();
+        let internal = self.sample_rate * factor as f64;
+        self.detector.set_sample_rate(internal);
+        self.amp.set_sample_rate(internal);
+        self.pad
+            .set_delay((LATENCY - self.oversampler.latency()) as usize);
+        // The noise is white at the internal rate, and the way back down to
+        // the host rate keeps only the audio band, which is `1 / factor` of
+        // it. Scaled by the root of the factor, the noise that is left is the
+        // same at every setting, so the quality switch cannot move the floor.
+        self.noise_gain = db_to_gain(self.revision.noise_floor_db) * (factor as f64).sqrt();
+    }
+
+    /// Always [`LATENCY`], whatever the oversampling.
     pub fn latency(&self) -> u32 {
-        self.oversampler.latency()
+        LATENCY
     }
 
     pub fn set_controls(&mut self, controls: Controls) {
@@ -218,6 +265,17 @@ impl Channel {
     }
 
     fn apply_controls(&mut self) {
+        self.input_gain = db_to_gain(self.controls.input_db);
+        self.output_gain = db_to_gain(self.controls.output_db);
+        // With no button in, the gain element is out of circuit and the
+        // sidechain with it. Letting go of what it held means that when a
+        // button goes back in, the reduction it starts from is the reduction
+        // the gain element is actually applying, which is none.
+        if self.controls.ratio().is_none() {
+            self.detector.reset();
+            self.reduction_db = 0.0;
+        }
+
         let all = self.controls.all_buttons();
         let blend = self.controls.combination();
         let ratio = self
@@ -228,7 +286,8 @@ impl Channel {
 
         // The bias shift is what makes a combination dirty as well as slow,
         // and it grows with how many buttons are in.
-        self.fet.set_bias_shift(1.0 + (COMBINED_FET_SHIFT - 1.0) * blend);
+        self.fet
+            .set_bias_shift(1.0 + (COMBINED_FET_SHIFT - 1.0) * blend);
 
         let (attack_scale, release_scale) = if all {
             (ALL_BUTTON_ATTACK, ALL_BUTTON_RELEASE)
@@ -267,10 +326,8 @@ impl Channel {
 
     #[inline]
     pub fn process(&mut self, sample: f32) -> f32 {
-        let input_gain = db_to_gain(self.controls.input_db);
-        let output_gain = db_to_gain(self.controls.output_db);
         let compressing = self.controls.ratio().is_some();
-        let noise_gain = db_to_gain(self.revision.noise_floor_db);
+        let noise_gain = self.noise_gain;
 
         let Self {
             detector,
@@ -283,34 +340,29 @@ impl Channel {
             ..
         } = self;
 
-        let out = oversampler.process(sample as f64 * input_gain, &mut |x| {
-            // The gain element runs on what the detector asked for last
-            // sample, which is how the loop is closed.
-            let reduced = if compressing {
-                fet.process(x, -*reduction_db)
-            } else {
-                x
-            };
+        let out = oversampler.process(sample as f64 * self.input_gain, &mut |x| {
+            // The gain element runs on what the detector asked for, and the
+            // detector is fed what came out, which is how the loop is closed.
+            if !compressing {
+                return amp.process(x) + white(noise) * noise_gain;
+            }
+            let reduced = fet.process(x, -*reduction_db);
             let amplified = amp.process(reduced) + white(noise) * noise_gain;
-
-            if compressing {
-                *reduction_db = detector.process(amplified);
-                if *reduction_db > *meter_db {
-                    *meter_db = *reduction_db;
-                }
-            } else {
-                *reduction_db = 0.0;
+            *reduction_db = detector.process_in_loop(amplified);
+            if *reduction_db > *meter_db {
+                *meter_db = *reduction_db;
             }
             amplified
         });
 
-        (out * output_gain) as f32
+        (self.pad.process(out) * self.output_gain) as f32
     }
 
     pub fn reset(&mut self) {
         self.detector.reset();
         self.amp.reset();
         self.oversampler.reset();
+        self.pad.reset();
         self.reduction_db = 0.0;
         self.meter_db = 0.0;
     }

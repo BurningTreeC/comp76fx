@@ -8,6 +8,26 @@ use nih_plug_vizia::vizia::vg;
 /// lettering stays readable.
 pub const PANEL_W: f32 = 1120.0;
 pub const PANEL_H: f32 = 260.0;
+/// What the panel takes from a vizia stylesheet: the text caret.
+///
+/// The editor runs with no theme at all -- deliberately, so nothing arrives
+/// looking like a default toolkit -- and with no theme an unset colour reads
+/// back as `rgba(0, 0, 0, 0)`, so the caret of the preset name box would be
+/// drawn in transparent black. Setting the colour on the `Textbox` itself,
+/// which is what the panel used to do, makes it visible but leaves it
+/// staring: vizia blinks the caret by toggling a `caret` class on and off,
+/// and only a rule can act on a class. The box is `checked` while it is being
+/// edited, so the colour hangs off both.
+pub const STYLESHEET: &str = r#"
+textbox {
+    caret-color: transparent;
+    selection-color: #4a7c8caa;
+}
+textbox:checked.caret {
+    caret-color: #d0d8de;
+}
+"#;
+
 /// The strip above the panel carrying the presets and settings.
 pub const HEADER_H: f32 = 34.0;
 pub const WINDOW_H: f32 = PANEL_H + HEADER_H;
@@ -17,8 +37,6 @@ pub const ROW: f32 = 130.0;
 
 pub const R_LARGE: f32 = 42.0;
 pub const R_SMALL: f32 = 34.0;
-/// Where the engraved scale sits around a knob.
-pub const SCALE_RADIUS: f32 = 56.0;
 /// A knob sweeps this many degrees, zero at the lower left.
 pub const SWEEP: f32 = 300.0;
 
@@ -135,98 +153,6 @@ pub fn cast_shadow(canvas: &mut Canvas, b: BoundingBox, scale: f32, spread: f32,
     );
 }
 
-/// One of the black pointer knobs. Finer knurling than the Pultec's, a domed
-/// top and a single white index line.
-pub fn draw_knob(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, angle: f32) {
-    let rot = angle.to_radians();
-    contact_shadow(canvas, cx, cy, r);
-
-    // Body, knurled around the rim.
-    const TEETH: usize = 34;
-    const STEPS: usize = TEETH * 6;
-    let mut body = vg::Path::new();
-    for i in 0..=STEPS {
-        let t = i as f32 / STEPS as f32 * std::f32::consts::TAU;
-        let knurl = 1.0 - 0.018 * (1.0 - (t * TEETH as f32).cos());
-        let a = t + rot;
-        let (x, y) = (cx + r * knurl * a.sin(), cy - r * knurl * a.cos());
-        if i == 0 {
-            body.move_to(x, y);
-        } else {
-            body.line_to(x, y);
-        }
-    }
-    body.close();
-    canvas.fill_path(
-        &body,
-        &vg::Paint::linear_gradient(cx, cy - r, cx, cy + r, rgb(0x33_33_37), rgb(0x08_08_0a)),
-    );
-    canvas.fill_path(
-        &body,
-        &vg::Paint::radial_gradient(cx, cy, r * 0.6, r, rgba(0x000000, 0.0), rgba(0x000000, 0.6)),
-    );
-    // Rim light along the top edge.
-    canvas.stroke_path(
-        &body,
-        &vg::Paint::linear_gradient(
-            cx,
-            cy - r,
-            cx,
-            cy + r * 0.4,
-            rgba(0xd4dae0, 0.45),
-            rgba(0xd4dae0, 0.0),
-        )
-        .with_line_width(r * 0.05),
-    );
-
-    // Domed top.
-    let top = r * 0.70;
-    let mut face = vg::Path::new();
-    face.circle(cx, cy, top);
-    canvas.fill_path(
-        &face,
-        &vg::Paint::radial_gradient(
-            cx - top * 0.35,
-            cy - top * 0.42,
-            top * 0.05,
-            top * 1.6,
-            rgb(0x45_45_4a),
-            rgb(0x0b_0b_0d),
-        ),
-    );
-    canvas.stroke_path(
-        &face,
-        &vg::Paint::color(rgba(0x000000, 0.5)).with_line_width(r * 0.04),
-    );
-    let mut sheen = vg::Path::new();
-    sheen.ellipse(cx - top * 0.28, cy - top * 0.40, top * 0.44, top * 0.24);
-    canvas.fill_path(
-        &sheen,
-        &vg::Paint::radial_gradient(
-            cx - top * 0.28,
-            cy - top * 0.40,
-            0.0,
-            top * 0.48,
-            rgba(0xff_ff_ff, 0.20),
-            rgba(0xff_ff_ff, 0.0),
-        ),
-    );
-
-    // The index line, running from the middle out across the rim.
-    let (sa, ca) = rot.sin_cos();
-    let mut index = vg::Path::new();
-    index.move_to(cx + r * 0.12 * sa, cy - r * 0.12 * ca);
-    index.line_to(cx + r * 0.94 * sa, cy - r * 0.94 * ca);
-    canvas.stroke_path(
-        &index,
-        &vg::Paint::color(rgba(0x000000, 0.7)).with_line_width(r * 0.14),
-    );
-    canvas.stroke_path(
-        &index,
-        &vg::Paint::color(rgb(0xf2_f0_ea)).with_line_width(r * 0.075),
-    );
-}
-
 /// A tick engraved into the panel around a knob.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_tick(
@@ -257,3 +183,71 @@ pub fn draw_tick(
     canvas.stroke_path(&path, &vg::Paint::color(over).with_line_width(width));
 }
 
+#[cfg(test)]
+mod tests {
+    use super::STYLESHEET;
+
+    /// The stylesheet has to be well formed, because nothing will say so if it
+    /// is not.
+    ///
+    /// `Context::add_stylesheet` returns `Ok(())` whatever happens, and the
+    /// parse behind it discards the whole sheet on one error -- so a missing
+    /// semicolon does not break one rule, it silently takes the caret with it.
+    /// vizia keeps its parser private, so this checks the structure, which is
+    /// what a typo actually breaks.
+    #[test]
+    fn the_stylesheet_is_well_formed() {
+        let mut depth = 0i32;
+        for (line, text) in STYLESHEET.lines().enumerate() {
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            if text.ends_with('{') {
+                depth += 1;
+                continue;
+            }
+            if text == "}" {
+                depth -= 1;
+                assert!(
+                    depth >= 0,
+                    "line {} closes a rule that never opened",
+                    line + 1
+                );
+                continue;
+            }
+            assert!(
+                depth > 0,
+                "line {} is a declaration outside any rule",
+                line + 1
+            );
+            assert!(
+                text.ends_with(';'),
+                "line {} has no semicolon, which discards the whole sheet: {text}",
+                line + 1
+            );
+            assert!(
+                text.contains(':'),
+                "line {} is not a declaration: {text}",
+                line + 1
+            );
+        }
+        assert_eq!(depth, 0, "a rule is left open");
+    }
+
+    /// The caret is the one rule whose absence looks like nothing at all: the
+    /// box still types, and there is simply no cursor in it.
+    #[test]
+    fn the_caret_has_a_colour_to_blink_in() {
+        assert!(
+            STYLESHEET.contains("textbox:checked.caret"),
+            "vizia blinks the caret by toggling a `caret` class, so the colour \
+             has to hang off that selector or it will not blink"
+        );
+        let visible = STYLESHEET
+            .lines()
+            .filter(|line| line.trim().starts_with("caret-color:"))
+            .any(|line| !line.contains("transparent"));
+        assert!(visible, "every caret-color in the sheet is transparent");
+    }
+}

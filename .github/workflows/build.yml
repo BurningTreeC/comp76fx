@@ -29,8 +29,13 @@ jobs:
             libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev \
             libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --release
+      - run: cargo fmt --all --check
+      - run: cargo test --release --workspace
+      - name: Test the window backend
+        run: cargo test --manifest-path vendor/baseview/Cargo.toml --lib
       # --workspace so the installer that ships to users is linted too.
       - run: cargo clippy --release --workspace --all-targets -- -D warnings
       - name: Third party notices are up to date
@@ -81,16 +86,16 @@ jobs:
       - name: Build the plugins
         run: |
           # All three revisions are separate plugins built from one workspace.
-          packages() { echo "-p comp76fx_rev_a -p comp76fx_rev_d -p comp76fx_rev_f"; }
+          packages=(-p comp76fx_rev_a -p comp76fx_rev_d -p comp76fx_rev_f)
           if [[ '${{ matrix.name }}' == 'macos-universal' ]]; then
             # Anything older than this cannot run the plugin anyway.
             export MACOSX_DEPLOYMENT_TARGET=10.13
             # cargo xtask ad-hoc signs the bundles after lipo. That is free and
             # needs no Apple account, and an arm64 binary will not load at all
             # without at least an ad-hoc signature.
-            cargo xtask bundle-universal $(packages) --release
+            cargo xtask bundle-universal "${packages[@]}" --release
           else
-            cargo xtask bundle $(packages) --release
+            cargo xtask bundle "${packages[@]}" --release
           fi
 
       - name: Stage the archive contents

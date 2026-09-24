@@ -1,9 +1,10 @@
 //! Does the unit measure the way the data sheet says, and does the meter point
 //! at the numbers printed on its own face?
 //!
-//! These pin the three things that were wrong: the release ran long, the ratio
-//! buttons read low, and the needle was placed as though a VU scale were
-//! linear in decibels.
+//! These pin the things that were wrong: the release ran long, the ratio
+//! buttons read low, the needle was placed as though a VU scale were linear in
+//! decibels, the dials stopped short of their slow ends, and the noise floor
+//! moved with the oversampling.
 
 use comp76fx_core::dsp::detector::{self, Timing};
 use comp76fx_core::dsp::Detector;
@@ -57,6 +58,86 @@ fn the_release_dial_means_what_it_says() {
     }
 }
 
+/// The shape of the recovery and the compensation for it are two constants
+/// in two places. Retune one and the release dial quietly stops meaning what
+/// it says, so the pair is checked here as well as through the dial.
+#[test]
+fn release_compensation_is_solved() {
+    let (share, ratio, compensation) = detector::RELEASE_SHAPE;
+    let u = 1.0 / compensation;
+    let left = (1.0 - share) * (-u).exp() + share * (-u / ratio).exp();
+    assert!(
+        (left - 0.37).abs() < 1e-4,
+        "the two stages recover to {left:.5} at the marked time, not 0.37"
+    );
+}
+
+/// The dials are engraved 1 to 7, and the ends of the engraving have to be the
+/// ends of the range the manual gives.
+#[test]
+fn the_dials_reach_their_marked_ends() {
+    use comp76fx_core::params::{dial_position, DIAL_MAX, DIAL_MIN};
+
+    assert_eq!(dial_position(DIAL_MIN), 0.0, "1 is fully anticlockwise");
+    assert_eq!(dial_position(DIAL_MAX), 1.0, "7 is fully clockwise");
+    assert!(
+        (dial_position(4.0) - 0.5).abs() < 1e-9,
+        "4 is halfway round"
+    );
+
+    let time = |mark: f32, fastest: f64, slowest: f64| {
+        detector::knob_to_time(dial_position(mark), fastest, slowest)
+    };
+    let slowest_attack = time(DIAL_MIN, detector::ATTACK_FASTEST, detector::ATTACK_SLOWEST);
+    let slowest_release = time(
+        DIAL_MIN,
+        detector::RELEASE_FASTEST,
+        detector::RELEASE_SLOWEST,
+    );
+    assert!(
+        (slowest_attack - 800e-6).abs() < 1e-9,
+        "attack at 1 is {:.0} us, the panel says 800",
+        slowest_attack * 1e6
+    );
+    assert!(
+        (slowest_release - 1.1).abs() < 1e-9,
+        "release at 1 is {:.0} ms, the panel says 1100",
+        slowest_release * 1e3
+    );
+}
+
+/// The noise is the circuit's, so the quality switch must not move it. It
+/// used to be added at the internal rate and filtered on the way down, which
+/// took 3 dB off the floor for every doubling: an idle Rev A read -91, -94,
+/// -97 and -100 dBFS at 1x, 2x, 4x and 8x.
+#[test]
+fn the_noise_floor_does_not_move_with_oversampling() {
+    use comp76fx_core::dsp::{Channel, Controls, REV_A};
+
+    let floor = |factor: usize| {
+        let mut channel = Channel::new(REV_A, 48_000.0, factor, 1);
+        channel.set_controls(Controls::default());
+        let n = 96_000;
+        let mut sum = 0.0;
+        for i in 0..n * 2 {
+            let y = channel.process(0.0) as f64;
+            if i >= n {
+                sum += y * y;
+            }
+        }
+        10.0 * (sum / n as f64).log10()
+    };
+    let reference = floor(1);
+    for factor in [2, 4, 8] {
+        let level = floor(factor);
+        println!("idle noise {factor}x: {level:.2} dBFS, 1x {reference:.2} dBFS");
+        assert!(
+            (level - reference).abs() < 0.5,
+            "the floor at {factor}x is {level:.1} dBFS against {reference:.1} at 1x"
+        );
+    }
+}
+
 #[test]
 fn the_attack_dial_means_what_it_says() {
     for marked in [detector::ATTACK_FASTEST, 200e-6, detector::ATTACK_SLOWEST] {
@@ -66,7 +147,7 @@ fn the_attack_dial_means_what_it_says() {
             attack: marked,
             release: detector::RELEASE_FASTEST,
             threshold: detector::THRESHOLD_DB,
-        knee: 0.0,
+            knee: 0.0,
         });
         let level = 10f64.powf(-6.0 / 20.0);
         let mut settled = 0.0;
@@ -112,8 +193,14 @@ fn the_needle_points_at_the_printed_numbers() {
     // A moving coil deflects with voltage, so the marks are spaced
     // logarithmically. Reading the face as linear in dB put 0 VU at the right
     // hand end of the scale instead of two thirds along it.
-    assert!((vu_position(-20.0) - 0.0).abs() < 1e-6, "the -20 mark is the left end");
-    assert!((vu_position(3.0) - 1.0).abs() < 1e-6, "the +3 mark is the right end");
+    assert!(
+        (vu_position(-20.0) - 0.0).abs() < 1e-6,
+        "the -20 mark is the left end"
+    );
+    assert!(
+        (vu_position(3.0) - 1.0).abs() < 1e-6,
+        "the +3 mark is the right end"
+    );
 
     let zero = vu_position(0.0);
     assert!(
@@ -155,19 +242,9 @@ fn the_needle_points_at_the_printed_numbers() {
 /// specified across.
 #[test]
 fn the_response_holds_its_window_at_every_rate() {
-    use comp76fx_core::dsp::{Channel, Controls, Finish, OutputStage, Revision};
+    use comp76fx_core::dsp::{Channel, Controls, Revision, REV_D};
 
-    const REV: Revision = Revision {
-        name: "Rev D",
-        finish: Finish::BlackFace,
-        slug: "spec",
-        stage: OutputStage::ClassA,
-        amp_drive: 0.45,
-        fet_drive: 1.00,
-        fet_bias: 0.12,
-        noise_floor_db: -400.0,
-        ratio_accuracy: 1.0,
-    };
+    const REV: Revision = REV_D.without_noise();
 
     // Unity gain with the gain element out of circuit, as the figure is quoted.
     let flat = Controls {
@@ -198,14 +275,13 @@ fn the_response_holds_its_window_at_every_rate() {
     };
 
     for fs in [44_100.0, 48_000.0, 96_000.0] {
-        for os in [1usize, 2, 4] {
+        for os in [1usize, 2, 4, 8] {
             let mid = response(1000.0, fs, os);
+            // 20 kHz included at 44.1 kHz: it is the edge the figure is
+            // quoted to, and the top of the oversampler's passband is closest
+            // to it there. A guard at 0.45 of the rate used to skip exactly
+            // that case.
             for hz in [20.0, 100.0, 10_000.0, 20_000.0] {
-                // Only up to what the rate can carry; 20 kHz is above Nyquist
-                // for nothing here, but keep the guard honest anyway.
-                if hz >= fs * 0.45 {
-                    continue;
-                }
                 let d = response(hz, fs, os) - mid;
                 assert!(
                     d.abs() <= 1.0,

@@ -37,7 +37,6 @@ const PINCH_PER_DB: f64 = 0.015;
 /// 2 % when it is being leaned on hard.
 const DEPTH: f64 = 0.20;
 
-
 pub struct Fet {
     /// How far this revision's trimmer leaves the channel from a null.
     modulation: f64,

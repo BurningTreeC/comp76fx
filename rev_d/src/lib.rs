@@ -4,22 +4,12 @@
 //! low noise circuitry, and a Class A output stage. Universal Audio's own
 //! reissue is patterned on the D and E versions, which are near enough
 //! identical to each other.
+//!
+//! The circuit values are [`comp76fx_core::dsp::REV_D`], kept in the core so
+//! the tests measure exactly what ships.
 
-use comp76fx_core::dsp::{Finish, OutputStage, Revision};
+use comp76fx_core::dsp::REV_D;
 use comp76fx_core::export_revision;
-
-const REV_D: Revision = Revision {
-    name: "Rev D",
-    slug: "comp76fx-rev-d",
-    finish: Finish::BlackFace,
-    stage: OutputStage::ClassA,
-    amp_drive: 0.45,
-    fet_drive: 1.00,
-    fet_bias: 0.12,
-    // The low noise circuit is what the LN in the name stands for.
-    noise_floor_db: -96.0,
-    ratio_accuracy: 1.0,
-};
 
 export_revision! {
     name: "Comp76Fx Rev D",

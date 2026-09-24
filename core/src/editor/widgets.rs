@@ -7,17 +7,20 @@ use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
 use nih_plug_vizia::widgets::{util::ModifiersExt, RawParamEvent};
 use std::cell::Cell;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use super::sprites::{self, Placement, Sprite};
+use super::sprites::{self, Cap, Placement, Sprite};
 use super::style::*;
+use crate::meters::{Meters, Reading};
 use crate::params::{Comp76Params, MeterMode};
-use crate::plugin::Meters;
 
 /// Pixels of vertical drag for the full range of a knob.
 const DRAG_RANGE: f32 = 240.0;
 /// How much finer the drag becomes while shift is held.
 const FINE: f32 = 0.15;
+/// The panel knobs and the small trim knobs are different castings; a knob
+/// smaller than this is a trim knob.
+const TRIM_BELOW: f32 = 25.0;
 
 // ---------------------------------------------------------------------------
 // Knob
@@ -49,7 +52,11 @@ impl Knob {
             radius,
             dragging: false,
             last_y: 0.0,
-            face: Sprite::new(),
+            face: Sprite::new(if radius >= TRIM_BELOW {
+                sprites::KNOB_LARGE
+            } else {
+                sprites::KNOB_SMALL
+            }),
         }
         .build(
             cx,
@@ -91,18 +98,10 @@ impl View for Knob {
     fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
         let bounds = cx.bounds();
         let r = self.radius * cx.scale_factor();
-        // The panel knobs and the small trim knobs are different castings.
-        const TRIM_BELOW: f32 = 25.0;
-        let (bytes, rest) = if self.radius >= TRIM_BELOW {
-            (sprites::KNOB_LARGE, sprites::KNOB_LARGE_REST)
-        } else {
-            (sprites::KNOB_SMALL, sprites::KNOB_SMALL_REST)
-        };
         // Pick the frame rendered at this angle rather than turning one image,
         // which would carry the lighting round with the knob.
         let position = self.param.modulated_normalized_value().clamp(0.0, 1.0);
         let frame = (position * (sprites::KNOB_FRAMES - 1) as f32).round() as usize;
-        let _ = rest;
         // The render is framed to the body's silhouette and stops dead at its
         // edge, so the knob has to be given the same contact shadow the drawn
         // controls lay down or it sits on the panel with nothing under it.
@@ -114,7 +113,6 @@ impl View for Knob {
         );
         self.face.draw_frame(
             canvas,
-            bytes,
             Placement {
                 x: bounds.x + bounds.w / 2.0,
                 y: bounds.y + bounds.h / 2.0,
@@ -257,11 +255,8 @@ impl View for Knob {
 /// to be quick.
 pub struct PushButton {
     param: ParamWidgetBase,
-    cap: Sprite,
-    label: &'static str,
-    /// Pressing this one alone releases its neighbours.
-    interlocked: bool,
-    /// The other switches in the same bank, for the interlock.
+    cap: Cap,
+    /// The other switches in the same bank, which a plain click releases.
     bank: Vec<nih_plug::prelude::ParamPtr>,
 }
 
@@ -270,8 +265,6 @@ impl PushButton {
         cx: &'a mut Context,
         params: L,
         params_to_param: FMap,
-        label: &'static str,
-        interlocked: bool,
         bank: Vec<nih_plug::prelude::ParamPtr>,
     ) -> Handle<'a, Self>
     where
@@ -282,9 +275,7 @@ impl PushButton {
     {
         Self {
             param: ParamWidgetBase::new(cx, params, params_to_param),
-            cap: Sprite::new(),
-            label,
-            interlocked,
+            cap: Cap::new(),
             bank,
         }
         .build(
@@ -305,8 +296,7 @@ impl View for PushButton {
     fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
         let pressed = self.param.modulated_normalized_value() > 0.5;
         self.cap
-            .draw_button(canvas, cx.bounds(), cx.scale_factor(), pressed);
-        let _ = self.label;
+            .draw(canvas, cx.bounds(), cx.scale_factor(), pressed);
     }
 
     fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
@@ -321,7 +311,7 @@ impl View for PushButton {
                 // Shift or ctrl latches, which is how all four go in at once.
                 let latching = cx.modifiers().shift() || cx.modifiers().command();
 
-                if self.interlocked && !latching {
+                if !latching {
                     // Release the rest of the bank, the way the mechanical
                     // interlock does.
                     for &other in &self.bank {
@@ -358,35 +348,65 @@ pub struct VuMeter {
     face: Sprite,
     meters: Arc<Meters>,
     params: Arc<Comp76Params>,
-    /// Where the needle actually is, and how fast it is travelling.
+    /// Where the needle actually is, and how fast it is travelling, in scale
+    /// lengths and scale lengths per second.
     position: Cell<f32>,
     velocity: Cell<f32>,
+    /// The last reading, held between audio blocks, and when it arrived.
+    reading: Cell<Reading>,
+    read_at: Cell<Option<Instant>>,
+    /// When the movement was last advanced, and the time since then it has
+    /// not yet been advanced through.
+    moved_at: Cell<Option<Instant>>,
+    unmoved: Cell<f32>,
 }
 
+/// The movement, as a spring and a damper: how hard the coil pulls towards
+/// the reading, per second squared, and how much of the needle's speed the
+/// damping takes, per second. Tuned by eye at a steady 60 frames a second,
+/// where they reproduce the ballistics exactly.
+const STIFFNESS: f32 = 198.0;
+const DAMPING: f32 = 18.0;
+/// The movement is advanced in steps of this length whatever the frame rate.
+/// Stepping once per drawn frame, which is what it used to do, made the
+/// needle faster on a fast display and slower whenever the host held a frame
+/// back.
+const MOVEMENT_STEP: f32 = 1.0 / 240.0;
+/// After a pause this long the movement jumps rather than catching up.
+const MOST_UNMOVED: f32 = 0.25;
+/// With no audio for this long the host has stopped processing, and a real
+/// meter with no signal falls back to rest.
+const READING_EXPIRES: f32 = 0.3;
+
 impl VuMeter {
-    pub fn new(cx: &mut Context, meters: Arc<Meters>, params: Arc<Comp76Params>) -> Handle<'_, Self> {
+    pub fn new(
+        cx: &mut Context,
+        meters: Arc<Meters>,
+        params: Arc<Comp76Params>,
+    ) -> Handle<'_, Self> {
         let mut handle = Self {
-            face: Sprite::new(),
+            face: Sprite::new(sprites::VU),
             meters,
             params,
             position: Cell::new(0.0),
             velocity: Cell::new(0.0),
+            reading: Cell::new(Reading::SILENT),
+            read_at: Cell::new(None),
+            moved_at: Cell::new(None),
+            unmoved: Cell::new(0.0),
         }
         .build(cx, |_| {});
 
         // The needle keeps travelling between parameter changes, so it drives
         // its own repaint rather than waiting to be asked.
-        let entity = handle.entity();
-        let timer = handle.context().add_timer(
-            Duration::from_millis(16),
-            None,
-            move |cx, action| {
-                if let TimerAction::Tick(_) = action {
-                    cx.needs_redraw();
-                    let _ = entity;
-                }
-            },
-        );
+        let timer =
+            handle
+                .context()
+                .add_timer(Duration::from_millis(16), None, move |cx, action| {
+                    if let TimerAction::Tick(_) = action {
+                        cx.needs_redraw();
+                    }
+                });
         handle.context().start_timer(timer);
         handle
     }
@@ -397,18 +417,51 @@ impl VuMeter {
     /// Deflection, not decibels: a moving coil's position follows the voltage
     /// through it, so this is the quantity the ballistics below should be
     /// smoothing and the quantity the scale is spaced by.
-    fn target(&self) -> f32 {
+    fn target(&self, now: Instant) -> f32 {
+        if let Some(reading) = self.meters.take() {
+            self.reading.set(reading);
+            self.read_at.set(Some(now));
+        } else if self
+            .read_at
+            .get()
+            .is_none_or(|at| now.duration_since(at).as_secs_f32() > READING_EXPIRES)
+        {
+            self.reading.set(Reading::SILENT);
+        }
+        let reading = self.reading.get();
+
         match self.params.meter.value() {
             // Gain reduction reads backwards: with the unit idle the needle
             // rests on the 0 mark, and it swings left as the unit works, so
             // 7 dB of reduction puts it on the -7.
-            MeterMode::GainReduction => sprites::vu_position(-self.meters.reduction_db()),
+            MeterMode::GainReduction => sprites::vu_position(-reading.reduction_db),
             // The reference marks are how far below full scale 0 VU sits.
-            MeterMode::Plus4 => sprites::vu_position(self.meters.output_db() + 18.0),
-            MeterMode::Plus8 => sprites::vu_position(self.meters.output_db() + 14.0),
+            MeterMode::Plus4 => sprites::vu_position(reading.output_db + 18.0),
+            MeterMode::Plus8 => sprites::vu_position(reading.output_db + 14.0),
             // Switched off, the movement falls back against its stop.
             MeterMode::Off => 0.0,
         }
+    }
+
+    /// Advances the movement to `now` towards `target`, in fixed steps.
+    fn swing(&self, now: Instant, target: f32) {
+        let elapsed = self
+            .moved_at
+            .get()
+            .map_or(0.0, |at| now.duration_since(at).as_secs_f32());
+        self.moved_at.set(Some(now));
+
+        let mut pending = (self.unmoved.get() + elapsed).min(MOST_UNMOVED);
+        let (mut position, mut velocity) = (self.position.get(), self.velocity.get());
+        while pending >= MOVEMENT_STEP {
+            let acceleration = (target - position) * STIFFNESS - velocity * DAMPING;
+            velocity += acceleration * MOVEMENT_STEP;
+            position = (position + velocity * MOVEMENT_STEP).clamp(-0.02, 1.02);
+            pending -= MOVEMENT_STEP;
+        }
+        self.unmoved.set(pending);
+        self.position.set(position);
+        self.velocity.set(velocity);
     }
 }
 
@@ -422,23 +475,19 @@ impl View for VuMeter {
         let scale = cx.scale_factor();
         let lit = self.params.power.value() && self.params.meter.value() != MeterMode::Off;
 
-        // Movement, integrated a frame at a time. Damped enough to settle
-        // without hunting, but not so much that it feels dead.
-        let target = if lit { self.target() } else { 0.0 };
+        let now = Instant::now();
+        // Taken whether or not the meter is lit, so switching it on shows what
+        // is happening now rather than what built up while it was off.
+        let target = self.target(now);
+        self.swing(now, if lit { target } else { 0.0 });
         let position = self.position.get();
-        let velocity = self.velocity.get();
-        let acceleration = (target - position) * 0.055 - velocity * 0.30;
-        let velocity = velocity + acceleration;
-        let position = (position + velocity).clamp(-0.02, 1.02);
-        self.position.set(position);
-        self.velocity.set(velocity);
 
         // The movement is a case bolted to the panel, not a picture printed on
         // it, so it casts a shadow like everything else on the faceplate.
         cast_shadow(canvas, b, scale, 7.0, 4.0 * scale);
 
         // The photographed movement, scale plate and all.
-        self.face.draw_rect(canvas, sprites::VU, b.x, b.y, b.w, b.h);
+        self.face.draw_rect(canvas, b.x, b.y, b.w, b.h);
 
         // The needle turns about the hub and is aimed at the mark it is
         // reading, so it lands on the printed scale wherever it is pointing
@@ -475,13 +524,12 @@ impl View for VuMeter {
     }
 }
 
-
 /// One switch of the meter bank. The four of them select between the
 /// positions of a single switch, so pressing one releases the rest by
 /// definition rather than by an interlock.
 pub struct ModeButton {
     param: ParamWidgetBase,
-    cap: Sprite,
+    cap: Cap,
     index: usize,
     positions: usize,
 }
@@ -502,7 +550,7 @@ impl ModeButton {
     {
         Self {
             param: ParamWidgetBase::new(cx, params, params_to_param),
-            cap: Sprite::new(),
+            cap: Cap::new(),
             index,
             positions,
         }
@@ -529,7 +577,7 @@ impl View for ModeButton {
 
     fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
         self.cap
-            .draw_button(canvas, cx.bounds(), cx.scale_factor(), self.selected());
+            .draw(canvas, cx.bounds(), cx.scale_factor(), self.selected());
     }
 
     fn event(&mut self, cx: &mut EventContext, event: &mut Event) {

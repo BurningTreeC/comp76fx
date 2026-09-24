@@ -4,9 +4,9 @@
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 
+use super::layout;
 use super::sprites::{self, Placement, Sprite};
 use super::style::*;
-use super::layout;
 use crate::dsp::{Finish, Revision};
 
 /// Fractions of the panel width the rack hardware sits at.
@@ -27,7 +27,7 @@ impl Faceplate {
     pub fn new(cx: &mut Context, revision: Revision) -> Handle<'_, Self> {
         Self {
             finish: revision.finish,
-            screws: [Sprite::new(), Sprite::new(), Sprite::new(), Sprite::new()],
+            screws: sprites::SCREWS.map(Sprite::new),
         }
         .build(cx, |_| {})
         .position_type(PositionType::SelfDirected)
@@ -126,7 +126,14 @@ impl View for Faceplate {
         ] {
             canvas.fill_path(
                 &panel,
-                &vg::Paint::linear_gradient(sx, sy, ex, ey, rgba(0x000000, alpha), rgba(0x000000, 0.0)),
+                &vg::Paint::linear_gradient(
+                    sx,
+                    sy,
+                    ex,
+                    ey,
+                    rgba(0x000000, alpha),
+                    rgba(0x000000, 0.0),
+                ),
             );
         }
 
@@ -164,7 +171,6 @@ impl View for Faceplate {
                 let k = i * 2 + j;
                 self.screws[k].draw(
                     canvas,
-                    sprites::SCREWS[k],
                     Placement {
                         x: b.x + b.w * fx,
                         y: b.y + b.h * fy,

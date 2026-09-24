@@ -16,7 +16,7 @@ By hand
 -------
 CLAP   copy Comp76Fx Rev A.clap, Rev D.clap and Rev F.clap to
          C:\Program Files\Common Files\CLAP
-VST3   copy the the three Comp76Fx .vst3 folders folder to
+VST3   copy the three Comp76Fx .vst3 folders to
          C:\Program Files\Common Files\VST3
 
 Or, without administrator rights, into

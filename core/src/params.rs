@@ -120,14 +120,28 @@ impl Comp76Params {
             editor_state,
             preset_name: Arc::new(Mutex::new(String::new())),
 
-            input: FloatParam::new("Input", 0.0, FloatRange::Linear { min: -20.0, max: 40.0 })
-                .with_unit(" dB")
-                .with_smoother(SmoothingStyle::Linear(20.0))
-                .with_value_to_string(formatters::v2s_f32_rounded(1)),
-            output: FloatParam::new("Output", 0.0, FloatRange::Linear { min: -40.0, max: 20.0 })
-                .with_unit(" dB")
-                .with_smoother(SmoothingStyle::Linear(20.0))
-                .with_value_to_string(formatters::v2s_f32_rounded(1)),
+            input: FloatParam::new(
+                "Input",
+                0.0,
+                FloatRange::Linear {
+                    min: -20.0,
+                    max: 40.0,
+                },
+            )
+            .with_unit(" dB")
+            .with_smoother(SmoothingStyle::Linear(20.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+            output: FloatParam::new(
+                "Output",
+                0.0,
+                FloatRange::Linear {
+                    min: -40.0,
+                    max: 20.0,
+                },
+            )
+            .with_unit(" dB")
+            .with_smoother(SmoothingStyle::Linear(20.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
             // The panel is engraved 1 to 7, slowest to fastest.
             attack: dial("Attack", 0.5),
             release: dial("Release", 0.5),
@@ -146,10 +160,17 @@ impl Comp76Params {
                         "off" | "false" | "no" | "0"
                     ))
                 })),
-            mix: FloatParam::new("Mix", 100.0, FloatRange::Linear { min: 0.0, max: 100.0 })
-                .with_unit(" %")
-                .with_smoother(SmoothingStyle::Linear(20.0))
-                .with_value_to_string(formatters::v2s_f32_rounded(0)),
+            mix: FloatParam::new(
+                "Mix",
+                100.0,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 100.0,
+                },
+            )
+            .with_unit(" %")
+            .with_smoother(SmoothingStyle::Linear(20.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(0)),
             oversampling: EnumParam::new("Oversampling", Oversampling::X4),
         }
     }
@@ -159,8 +180,8 @@ impl Comp76Params {
         Controls {
             input_db: input as f64,
             output_db: output as f64,
-            attack: (attack / 7.0) as f64,
-            release: (release / 7.0) as f64,
+            attack: dial_position(attack),
+            release: dial_position(release),
             buttons: [
                 self.ratio_4.value(),
                 self.ratio_8.value(),
@@ -171,12 +192,32 @@ impl Comp76Params {
     }
 }
 
+/// Lowest and highest marks on the attack and release dials.
+pub const DIAL_MIN: f32 = 1.0;
+pub const DIAL_MAX: f32 = 7.0;
+
+/// Where a mark on an attack or release dial sits along its travel, from
+/// `0.0` fully anticlockwise to `1.0` fully clockwise, which is how
+/// [`Controls`] wants it.
+///
+/// The dials are engraved 1 to 7, so 1 is the slow end and 7 the fast one.
+/// Dividing by 7, which is what this used to do, put the 1 a seventh of the
+/// way round: the slowest attack stopped at 470 us rather than 800 us, the
+/// slowest release at 710 ms rather than 1.1 s, and every mark between sat
+/// off where it belongs.
+pub fn dial_position(marked: f32) -> f64 {
+    (((marked - DIAL_MIN) / (DIAL_MAX - DIAL_MIN)) as f64).clamp(0.0, 1.0)
+}
+
 /// The attack and release dials, engraved 1 to 7 like the hardware.
 fn dial(name: &'static str, position: f32) -> FloatParam {
     FloatParam::new(
         name,
-        1.0 + position * 6.0,
-        FloatRange::Linear { min: 1.0, max: 7.0 },
+        DIAL_MIN + position * (DIAL_MAX - DIAL_MIN),
+        FloatRange::Linear {
+            min: DIAL_MIN,
+            max: DIAL_MAX,
+        },
     )
     .with_smoother(SmoothingStyle::Linear(20.0))
     .with_value_to_string(Arc::new(|v| format!("{v:.1}")))

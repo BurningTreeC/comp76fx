@@ -15,6 +15,7 @@
 
 pub mod dsp;
 pub mod editor;
+pub mod meters;
 pub mod params;
 pub mod plugin;
 pub mod presets;

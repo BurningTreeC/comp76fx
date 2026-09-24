@@ -2,8 +2,14 @@
 //!
 //! The 1176 is a feedback compressor: the detector samples the signal *after*
 //! the gain element, so the loop settles rather than being computed from the
-//! input. That is what gives it a naturally soft knee, and it is why the ratio
-//! that comes out is set by the loop gain rather than by a curve.
+//! input. That is why the ratio that comes out is set by the loop gain rather
+//! than by a curve, and why the buttons land on their markings.
+//!
+//! It does not, on its own, soften the knee. A loop closed around a rectifier
+//! with a definite threshold settles on a static curve with the same hard
+//! corner: at 4:1 the reduction is three quarters of the overshoot from the
+//! first decibel over. The one knee in the model is the one all-button mode
+//! opens, below.
 //!
 //! With `k` as the sidechain's gain, the static solution of the loop is
 //!
@@ -18,6 +24,9 @@
 //! and discharging it through the release network. The release is not one
 //! exponential: a second, slower stage runs alongside the first, which is what
 //! makes the recovery program dependent rather than a fixed curve.
+//!
+//! The loop is solved within each sample rather than one sample behind
+//! itself. See [`Detector::process_in_loop`].
 
 /// Attack times the front panel sweeps between, in seconds. Fully clockwise is
 /// fastest, which is backwards from most compressors.
@@ -46,6 +55,12 @@ pub const THRESHOLD_DB: f64 = -24.0;
 const DEMAND_LINEAR_DB: f64 = 40.0;
 const MAX_DEMAND_DB: f64 = 64.0;
 
+/// How closely the loop is solved, in dB of demand, and how many steps that
+/// is allowed to take. Newton's method on a curve that is piecewise linear
+/// almost everywhere lands in one or two; the rest is a bracketed fallback.
+const SOLVE_TOLERANCE_DB: f64 = 1e-9;
+const SOLVE_STEPS: usize = 32;
+
 /// How much of the recovery comes from the slower of the two stages.
 const SLOW_STAGE_SHARE: f64 = 0.35;
 /// The slow stage runs this many times longer than the release setting.
@@ -59,8 +74,8 @@ const SLOW_STAGE_RATIO: f64 = 6.0;
 /// ```
 ///
 /// for the values above gives u = 1.7785, so without this every release
-/// setting ran 78 % long. `release_compensation_is_solved` in the tests keeps
-/// the two in step if the shape is ever retuned.
+/// setting ran 78 % long. `release_compensation_is_solved` in
+/// `tests/calibration.rs` keeps the two in step if the shape is ever retuned.
 const RELEASE_COMPENSATION: f64 = 1.0 / 1.778_477;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -135,23 +150,130 @@ impl Detector {
         self.release_slow = coefficient(fast * SLOW_STAGE_RATIO, self.sample_rate);
     }
 
-    /// Feed the detector the compressed output and get back the gain reduction
-    /// it asks for, in dB.
+    /// The attack and release networks on their own, driven by a level that
+    /// takes no notice of what they do. This is what the times on the panel
+    /// describe, and what the calibration tests measure; the plugin runs
+    /// [`process_in_loop`](Self::process_in_loop).
     #[inline]
     pub fn process(&mut self, output: f64) -> f64 {
-        // The rectifier only sees how far the output sits above the operating
-        // point; below it the sidechain does nothing at all.
-        let level_db = 20.0 * (output.abs() + 1e-12).log10();
-        // Just the sidechain's own gain. Dividing by `1 + k` here as well
-        // would apply the ratio twice, since closing the loop around the gain
-        // element is what produces that term.
-        let over = knee(level_db - self.timing.threshold, self.timing.knee);
-        let demand = limit_demand(over * self.timing.k);
+        let (demand, _) = self.demand(level_db(output));
+        self.charge(demand)
+    }
 
-        // Charging is one time constant, recovery is two running together.
+    /// Feed the detector the output the gain element made with the reduction
+    /// this detector last asked for, and get back the reduction for the next
+    /// sample, in dB.
+    ///
+    /// The loop is solved rather than run one sample behind itself. Running it
+    /// behind -- the demand worked out from an output that has not yet been
+    /// reduced by the charge it is about to cause -- is a step the size of the
+    /// open loop gain, and a fast attack takes most of it at once. At the
+    /// fastest setting without oversampling that overshot the settling point
+    /// by 20 dB on the first sample of a transient, and because the envelope
+    /// was then above its demand it held the excess for the whole release.
+    ///
+    /// So the demand is found together with the envelope it produces. The
+    /// gain element is a divider, so in decibels a change in reduction is a
+    /// plain subtraction from the output: had the envelope landed on `r`, the
+    /// rectifier would have seen `unreduced - r`. Where the charge lands rises
+    /// with the demand and the demand falls as the charge rises, so there is
+    /// exactly one point where they agree, and that is the sample's demand.
+    /// At equilibrium it is the same point the old loop settled on, so the
+    /// ratios are unchanged; it just no longer overshoots getting there.
+    #[inline]
+    pub fn process_in_loop(&mut self, output: f64) -> f64 {
+        let unreduced = level_db(output) + self.reduction();
+        let demand = self.solve(unreduced);
+        self.charge(demand)
+    }
+
+    /// The gain reduction the detector is asking for now, in dB.
+    pub fn reduction(&self) -> f64 {
+        self.fast * (1.0 - SLOW_STAGE_SHARE) + self.slow * SLOW_STAGE_SHARE
+    }
+
+    /// Charging is one time constant, recovery is two running together.
+    #[inline]
+    fn charge(&mut self, demand: f64) -> f64 {
         self.fast = follow(self.fast, demand, self.attack_coef, self.release_fast);
         self.slow = follow(self.slow, demand, self.attack_coef, self.release_slow);
-        self.fast * (1.0 - SLOW_STAGE_SHARE) + self.slow * SLOW_STAGE_SHARE
+        self.reduction()
+    }
+
+    /// What the sidechain asks for at a level at the rectifier, and how fast
+    /// that changes with the level.
+    #[inline]
+    fn demand(&self, level_db: f64) -> (f64, f64) {
+        // The rectifier only sees how far the output sits above the operating
+        // point; below it the sidechain does nothing at all. The gain is just
+        // the sidechain's own: dividing by `1 + k` here as well would apply
+        // the ratio twice, since closing the loop is what produces that term.
+        let (over, d_over) = knee_with_slope(level_db - self.timing.threshold, self.timing.knee);
+        let (demand, d_demand) = limit_with_slope(over * self.timing.k);
+        (demand, d_demand * self.timing.k * d_over)
+    }
+
+    /// Where the envelope lands this sample if the demand is `demand`, and
+    /// how fast that moves with the demand. Each stage charges or discharges
+    /// depending on which side of the demand it is, exactly as `charge` will.
+    #[inline]
+    fn landing(&self, demand: f64) -> (f64, f64) {
+        let stage = |current: f64, release: f64| {
+            let coef = if demand > current {
+                self.attack_coef
+            } else {
+                release
+            };
+            (demand + (current - demand) * coef, 1.0 - coef)
+        };
+        let (fast, d_fast) = stage(self.fast, self.release_fast);
+        let (slow, d_slow) = stage(self.slow, self.release_slow);
+        (
+            fast * (1.0 - SLOW_STAGE_SHARE) + slow * SLOW_STAGE_SHARE,
+            d_fast * (1.0 - SLOW_STAGE_SHARE) + d_slow * SLOW_STAGE_SHARE,
+        )
+    }
+
+    /// The demand that agrees with the reduction it causes.
+    ///
+    /// `unreduced` is the level the rectifier would see with no reduction.
+    /// The root of `h(d) = d - demand(unreduced - landing(d))` is found by
+    /// Newton's method inside a bracket that always holds it: `h` rises with
+    /// `d`, is below zero at nothing, and is at or above zero at the demand
+    /// the envelope would meet if it released as far as it can this sample.
+    #[inline]
+    fn solve(&self, unreduced: f64) -> f64 {
+        let (floor, _) = self.landing(0.0);
+        let (ceiling, _) = self.demand(unreduced - floor);
+        // Still under the operating point after releasing: nothing to solve,
+        // which is also every sample below threshold and near a zero crossing.
+        if ceiling <= 0.0 {
+            return 0.0;
+        }
+
+        let (mut low, mut high) = (0.0, ceiling);
+        let mut demand = ceiling;
+        for _ in 0..SOLVE_STEPS {
+            let (landed, d_landed) = self.landing(demand);
+            let (wanted, d_wanted) = self.demand(unreduced - landed);
+            let error = demand - wanted;
+            if error.abs() <= SOLVE_TOLERANCE_DB {
+                break;
+            }
+            if error > 0.0 {
+                high = demand;
+            } else {
+                low = demand;
+            }
+            // The slope is at least one, so the step is always defined.
+            let next = demand - error / (1.0 + d_wanted * d_landed);
+            demand = if next > low && next < high {
+                next
+            } else {
+                0.5 * (low + high)
+            };
+        }
+        demand
     }
 
     pub fn reset(&mut self) {
@@ -171,16 +293,23 @@ impl Detector {
 /// before any feedback arrived.
 #[inline]
 pub fn knee(over: f64, width: f64) -> f64 {
+    knee_with_slope(over, width).0
+}
+
+/// [`knee`] and its derivative, which the loop solver steps along.
+#[inline]
+fn knee_with_slope(over: f64, width: f64) -> (f64, f64) {
     if width <= 0.0 {
-        return over.max(0.0);
+        return if over > 0.0 { (over, 1.0) } else { (0.0, 0.0) };
     }
     let half = width * 0.5;
     if over <= -half {
-        0.0
+        (0.0, 0.0)
     } else if over >= half {
-        over
+        (over, 1.0)
     } else {
-        (over + half) * (over + half) / (2.0 * width)
+        let rise = over + half;
+        (rise * rise / (2.0 * width), rise / width)
     }
 }
 
@@ -188,14 +317,28 @@ pub fn knee(over: f64, width: f64) -> f64 {
 /// the knee, so the ratio the buttons mark is the ratio the loop settles at.
 #[inline]
 pub fn limit_demand(raw: f64) -> f64 {
-    if raw <= DEMAND_LINEAR_DB {
-        return raw;
-    }
-    let span = MAX_DEMAND_DB - DEMAND_LINEAR_DB;
-    DEMAND_LINEAR_DB + span * ((raw - DEMAND_LINEAR_DB) / span).tanh()
+    limit_with_slope(raw).0
 }
 
-/// Exposed so a test can check the compensation above still solves the shape.
+/// [`limit_demand`] and its derivative.
+#[inline]
+fn limit_with_slope(raw: f64) -> (f64, f64) {
+    if raw <= DEMAND_LINEAR_DB {
+        return (raw, 1.0);
+    }
+    let span = MAX_DEMAND_DB - DEMAND_LINEAR_DB;
+    let bend = ((raw - DEMAND_LINEAR_DB) / span).tanh();
+    (DEMAND_LINEAR_DB + span * bend, 1.0 - bend * bend)
+}
+
+/// A sample's level in dB. The offset keeps silence finite.
+#[inline]
+fn level_db(sample: f64) -> f64 {
+    20.0 * (sample.abs() + 1e-12).log10()
+}
+
+/// Exposed so `release_compensation_is_solved` can check the compensation
+/// above still solves the shape.
 pub const RELEASE_SHAPE: (f64, f64, f64) =
     (SLOW_STAGE_SHARE, SLOW_STAGE_RATIO, RELEASE_COMPENSATION);
 

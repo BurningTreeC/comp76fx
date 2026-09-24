@@ -8,12 +8,13 @@ Run install.sh from this folder:
   ./install.sh              install for you
   ./install.sh --system     install for all users (run with sudo)
 
-It copies both plugins into ~/.clap/BurningTreeC and ~/.vst3/BurningTreeC.
+It copies all three plugins, as CLAP and VST3, into ~/.clap/BurningTreeC
+and ~/.vst3/BurningTreeC.
 
 By hand
 -------
-CLAP   copy Comp76Fx Rev A.clap, Rev D.clap and Rev F.clap to            ~/.clap
-VST3   copy the the three Comp76Fx .vst3 folders folder to ~/.vst3
+CLAP   copy Comp76Fx Rev A.clap, Rev D.clap and Rev F.clap to ~/.clap
+VST3   copy the three Comp76Fx .vst3 folders to ~/.vst3
 
 For all users, use /usr/lib/clap and /usr/lib/vst3 instead. Create the
 directory first if it does not exist. A per-vendor subfolder such as

@@ -15,8 +15,8 @@ use nih_plug_vizia::{assets, create_vizia_editor, ViziaState, ViziaTheming};
 use std::sync::Arc;
 
 use crate::dsp::Revision;
+use crate::meters::Meters;
 use crate::params::Comp76Params;
-use crate::plugin::Meters;
 use panel::Faceplate;
 use settings::{Dialogs, Header, SettingsOverlay, UiState};
 use style::*;
@@ -68,11 +68,14 @@ pub fn remember_scale(state: &Arc<ViziaState>, scale: f64) {
     }
 }
 
-
 /// Stores the requested scale before the host reads `Editor::size()`.
 /// Returns whether the UI should adopt it. A refusal restores the persisted
 /// size, so drawing and host geometry continue to agree.
-pub fn apply_scale(state: &Arc<ViziaState>, gui: &dyn nih_plug::prelude::GuiContext, scale: f64) -> bool {
+pub fn apply_scale(
+    state: &Arc<ViziaState>,
+    gui: &dyn nih_plug::prelude::GuiContext,
+    scale: f64,
+) -> bool {
     let previous = state.user_scale_factor();
     if scale == previous {
         return true;
@@ -99,6 +102,9 @@ pub fn create(
     create_vizia_editor(state, ViziaTheming::None, move |cx, gui| {
         assets::register_noto_sans_regular(cx);
         assets::register_noto_sans_bold(cx);
+        // The only styling the panel takes from a sheet rather than from its
+        // own drawing. See `style::STYLESHEET` for why it cannot be inline.
+        let _ = cx.add_stylesheet(STYLESHEET);
 
         Panel {
             params: params.clone(),
@@ -107,7 +113,7 @@ pub fn create(
         UiState::new(
             state_for_scale.user_scale_factor(),
             params.clone(),
-            revision.slug,
+            revision,
             gui,
         )
         .build(cx);
@@ -159,7 +165,14 @@ fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, me
     }
 
     // --- ratio switches -----------------------------------------------------
-    engraved(cx, ink, "RATIO", (RATIO_X[0] + RATIO_X[3]) / 2.0 + RATIO_W / 2.0, 46.0, 11.0);
+    engraved(
+        cx,
+        ink,
+        "RATIO",
+        (RATIO_X[0] + RATIO_X[3]) / 2.0 + RATIO_W / 2.0,
+        46.0,
+        11.0,
+    );
     let ratio_ptrs: Vec<_> = {
         let p = &*params;
         vec![
@@ -179,10 +192,10 @@ fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, me
             .map(|(_, ptr)| *ptr)
             .collect();
         let button = match index {
-            0 => PushButton::new(cx, Panel::params, |p| &p.ratio_4, labels[0], true, bank),
-            1 => PushButton::new(cx, Panel::params, |p| &p.ratio_8, labels[1], true, bank),
-            2 => PushButton::new(cx, Panel::params, |p| &p.ratio_12, labels[2], true, bank),
-            _ => PushButton::new(cx, Panel::params, |p| &p.ratio_20, labels[3], true, bank),
+            0 => PushButton::new(cx, Panel::params, |p| &p.ratio_4, bank),
+            1 => PushButton::new(cx, Panel::params, |p| &p.ratio_8, bank),
+            2 => PushButton::new(cx, Panel::params, |p| &p.ratio_12, bank),
+            _ => PushButton::new(cx, Panel::params, |p| &p.ratio_20, bank),
         };
         button
             .position_type(PositionType::SelfDirected)
@@ -190,7 +203,14 @@ fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, me
             .top(Pixels(ROW - RATIO_H / 2.0))
             .width(Pixels(RATIO_W))
             .height(Pixels(RATIO_H));
-        engraved(cx, ink, labels[index], x + RATIO_W / 2.0, ROW + RATIO_H / 2.0 + 16.0, 11.0);
+        engraved(
+            cx,
+            ink,
+            labels[index],
+            x + RATIO_W / 2.0,
+            ROW + RATIO_H / 2.0 + 16.0,
+            11.0,
+        );
     }
     small(
         cx,
@@ -217,7 +237,14 @@ fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, me
             .top(Pixels(MODE_Y))
             .width(Pixels(MODE_W))
             .height(Pixels(MODE_H));
-        small(cx, ink, mode_labels[index], x + MODE_W / 2.0, MODE_Y + MODE_H + 12.0, 9.0);
+        small(
+            cx,
+            ink,
+            mode_labels[index],
+            x + MODE_W / 2.0,
+            MODE_Y + MODE_H + 12.0,
+            9.0,
+        );
     }
 
     // --- nameplate ----------------------------------------------------------

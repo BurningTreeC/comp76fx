@@ -8,6 +8,7 @@
 *.vst3
 
 # Editor and OS droppings
+__pycache__/
 *~
 *.swp
 *.rs.bk

@@ -9,41 +9,25 @@
 //! number of samples at the host rate (`M` samples for the first stage, `M / 2`
 //! for the second, `M / 4` for the third).
 
+use super::delay::Delay;
+
 /// Taps and Kaiser beta per stage. The first stage has to keep 20 kHz flat at
 /// 44.1 kHz, which needs a long filter; later stages run at a rate where the
 /// audio band takes up much less of the spectrum and can be far shorter.
 const STAGES: [(usize, f64); 3] = [(64, 10.0), (16, 8.0), (8, 7.0)];
 
-/// A delay line of a fixed whole number of samples.
-struct Delay {
-    buf: Vec<f64>,
-    pos: usize,
-}
-
-impl Delay {
-    fn new(len: usize) -> Self {
-        Self {
-            buf: vec![0.0; len.max(1)],
-            pos: 0,
-        }
+/// Round trip latency with every stage in use, in samples at the host rate.
+/// Each stage adds `M` samples at its own rate, which is `M >> i` at the host
+/// rate for the `i`th stage.
+pub const MAX_LATENCY: u32 = {
+    let mut total = 0;
+    let mut i = 0;
+    while i < STAGES.len() {
+        total += (STAGES[i].0 >> i) as u32;
+        i += 1;
     }
-
-    #[inline]
-    fn process(&mut self, x: f64) -> f64 {
-        let out = self.buf[self.pos];
-        self.buf[self.pos] = x;
-        self.pos += 1;
-        if self.pos == self.buf.len() {
-            self.pos = 0;
-        }
-        out
-    }
-
-    fn reset(&mut self) {
-        self.buf.iter_mut().for_each(|v| *v = 0.0);
-        self.pos = 0;
-    }
-}
+    total
+};
 
 /// The odd phase of a halfband filter: `y[n] = sum_k c[k] * x[n - k]`.
 struct OddPhase {
@@ -111,9 +95,9 @@ impl Stage {
         let up_taps: Vec<f64> = odd.iter().map(|c| c * 2.0).collect();
         Self {
             up_fir: OddPhase::new(up_taps),
-            up_delay: Delay::new(m / 2),
+            up_delay: Delay::new(m / 2, m / 2),
             down_fir: OddPhase::new(odd),
-            down_delay: Delay::new(m / 2),
+            down_delay: Delay::new(m / 2, m / 2),
         }
     }
 

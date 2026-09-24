@@ -4,22 +4,13 @@
 //! steady tone, let the loop settle, and look at how far the output moves for
 //! a given move at the input.
 
-use comp76fx_core::dsp::{Channel, Controls, Finish, OutputStage, Revision};
+use comp76fx_core::dsp::{self, Channel, Controls, Revision};
+use comp76fx_core::params::dial_position;
 
 const FS: f64 = 96_000.0;
 
-const REV_D: Revision = Revision {
-    name: "Rev D",
-    finish: Finish::BlackFace,
-    slug: "comp76fx-rev-d",
-    stage: OutputStage::ClassA,
-    amp_drive: 0.45,
-    fet_drive: 1.0,
-    fet_bias: 0.12,
-    // Silenced for measurement; noise is checked separately.
-    noise_floor_db: -400.0,
-    ratio_accuracy: 1.0,
-};
+/// Silenced for measurement; noise is checked separately.
+const REV_D: Revision = dsp::REV_D.without_noise();
 
 fn buttons(index: usize) -> [bool; 4] {
     let mut buttons = [false; 4];
@@ -205,19 +196,91 @@ fn attack_spans_the_specified_range() {
     // envelope passes 63 % of its settling point well before one time
     // constant has elapsed. The figures below are that closed loop behaviour,
     // and the span between them is what the knob is worth in use.
+    //
+    // The fastest setting is held up by the tone rather than by the knob.
+    // Starting from a zero crossing, a 3 kHz sine takes about 26 us to rise
+    // far enough to call for 63 % of the reduction it settles at, so no
+    // detector can get there sooner. This test once demanded a tenfold span
+    // and the fastest setting met it in a single sample -- by overshooting
+    // the settling point by 20 dB, which was the bug, not the attack.
     let fastest = attack_time_ms(1.0);
     let slowest = attack_time_ms(0.0);
     println!("attack   fastest {fastest:.3} ms   slowest {slowest:.3} ms");
-    assert!(fastest < 0.05, "fastest attack was {fastest:.3} ms");
+    assert!(
+        (0.025..0.05).contains(&fastest),
+        "fastest attack was {fastest:.3} ms"
+    );
     assert!(
         (0.15..0.6).contains(&slowest),
         "slowest attack was {slowest:.3} ms"
     );
     assert!(
-        slowest > fastest * 10.0,
-        "the attack knob spans only {:.0}x",
+        slowest > fastest * 5.0,
+        "the attack knob spans only {:.1}x",
         slowest / fastest
     );
+}
+
+/// The deepest reduction reached in the first few milliseconds of a tone that
+/// comes in at its peak, against the deepest once it has settled, in dB.
+///
+/// The tone is faded in over a tenth of a millisecond rather than switched
+/// on. A tone switched on at its peak is a step, and the oversampler's
+/// reconstruction of a step rings about a decibel past it, as any band
+/// limited step does; the fastest attack rightly catches that. A fade this
+/// short is still a hard transient -- five samples at 48 kHz -- but it is one
+/// the band can carry, so what is left is the loop's own behaviour.
+fn attack_overshoot_db(buttons: [bool; 4], fs: f64, factor: usize) -> f64 {
+    let controls = Controls {
+        buttons,
+        input_db: 20.0,
+        attack: 1.0,
+        ..Controls::default()
+    };
+    let mut channel = Channel::new(REV_D, fs, factor, 1);
+    channel.set_controls(controls);
+    let w = std::f64::consts::TAU * 1000.0 / fs;
+    let total = (fs * 1.5) as usize;
+    let fade = (fs * 0.0001) as usize;
+    let (mut early, mut late) = (0.0f64, 0.0f64);
+    for n in 0..total {
+        let gain = if n < fade {
+            0.5 - 0.5 * (std::f64::consts::PI * n as f64 / fade as f64).cos()
+        } else {
+            1.0
+        };
+        channel.process((0.1 * gain * (w * n as f64).cos()) as f32);
+        let reduction = channel.gain_reduction_db();
+        if n < (fs * 0.005) as usize {
+            early = early.max(reduction);
+        }
+        if n >= total - (fs * 0.02) as usize {
+            late = late.max(reduction);
+        }
+    }
+    early - late
+}
+
+/// A transient must not pull the gain further down than the tone behind it
+/// settles at.
+///
+/// The loop used to run one sample behind itself, and at the fastest attack
+/// that step overshot: without oversampling this transient dug up to 20 dB
+/// past the settling point and held it for the whole release, and at 2x it
+/// was still 3 dB. The attack test above starts at a zero crossing and only
+/// looks for the 63 % point, so it never saw it.
+#[test]
+fn a_fast_attack_does_not_overshoot() {
+    for (fs, factor) in [(44_100.0, 1), (48_000.0, 1), (48_000.0, 2), (48_000.0, 4)] {
+        for index in 0..4 {
+            let overshoot = attack_overshoot_db(buttons(index), fs, factor);
+            println!("{fs} Hz {factor}x, button {index}: overshoot {overshoot:+.2} dB");
+            assert!(
+                overshoot < 0.5,
+                "button {index} at {fs} Hz, {factor}x overshot by {overshoot:.1} dB"
+            );
+        }
+    }
 }
 
 /// The same, for the recovery.
@@ -304,22 +367,9 @@ fn the_revisions_are_audibly_different() {
         20.0 * (harmonics / fundamental).log10()
     };
 
-    let rev_a = distortion(Revision {
-        amp_drive: 0.62,
-        fet_drive: 1.55,
-        fet_bias: 0.30,
-        noise_floor_db: -400.0,
-        ratio_accuracy: 0.88,
-        ..REV_D
-    });
+    let rev_a = distortion(dsp::REV_A.without_noise());
     let rev_d = distortion(REV_D);
-    let rev_f = distortion(Revision {
-        stage: OutputStage::ClassAb,
-        amp_drive: 0.34,
-        fet_drive: 0.62,
-        fet_bias: 0.04,
-        ..REV_D
-    });
+    let rev_f = distortion(dsp::REV_F.without_noise());
 
     println!("distortion   Rev A {rev_a:.1} dB   Rev D {rev_d:.1} dB   Rev F {rev_f:.1} dB");
     assert!(rev_a > rev_d, "Rev A should be dirtier than Rev D");
@@ -348,11 +398,14 @@ fn the_all_buttons_in_preset_really_is() {
     let controls = Controls {
         input_db: dial("input") as f64,
         output_db: dial("output") as f64,
-        attack: (dial("attack") / 7.0) as f64,
-        release: (dial("release") / 7.0) as f64,
+        attack: dial_position(dial("attack")),
+        release: dial_position(dial("release")),
         buttons: [true; 4],
     };
-    assert!(controls.all_buttons(), "the preset must reach all-button mode");
+    assert!(
+        controls.all_buttons(),
+        "the preset must reach all-button mode"
+    );
 
     // The ratio the switches select is checked elsewhere, at levels where the
     // sidechain is still in its linear region. This preset deliberately drives
@@ -407,9 +460,18 @@ fn all_buttons_is_dirtier_than_a_plain_ratio() {
         100.0 * harmonics / fundamental
     };
 
-    let driven = Controls { input_db: 16.0, ..Controls::default() };
-    let all = distortion(Controls { buttons: [true; 4], ..driven });
-    let four = distortion(Controls { buttons: buttons(0), ..driven });
+    let driven = Controls {
+        input_db: 16.0,
+        ..Controls::default()
+    };
+    let all = distortion(Controls {
+        buttons: [true; 4],
+        ..driven
+    });
+    let four = distortion(Controls {
+        buttons: buttons(0),
+        ..driven
+    });
     println!("at the same settings: all buttons in {all:.2} %, 4:1 {four:.2} %");
 
     assert!(
@@ -417,5 +479,8 @@ fn all_buttons_is_dirtier_than_a_plain_ratio() {
         "all-button mode should be plainly the dirtier one: {all:.2} % against {four:.2} %"
     );
     // And not so dirty that it has stopped being a compressor.
-    assert!(all < 6.0, "all-button mode at {all:.2} % is a fuzz box, not an 1176");
+    assert!(
+        all < 6.0,
+        "all-button mode at {all:.2} % is a fuzz box, not an 1176"
+    );
 }

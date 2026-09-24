@@ -9,13 +9,14 @@
 //!
 //! An image belongs to the canvas that uploaded it, and a second instance of
 //! the plugin gets a second canvas, so each widget uploads and caches its own
-//! rather than sharing one through a global.
+//! rather than sharing one through a global. A [`Sprite`] is tied to one image
+//! when it is made: a cache that took its image as an argument on every draw
+//! kept whichever it saw first and quietly drew that for the other, which is
+//! how the switch caps never changed colour when pressed.
 
 use nih_plug_vizia::vizia::prelude::Canvas;
 use nih_plug_vizia::vizia::vg;
 use std::cell::Cell;
-
-use super::style::SWEEP;
 
 pub const KNOB_LARGE: &[u8] = include_bytes!("../../../assets/gen/knob_large.png");
 pub const KNOB_SMALL: &[u8] = include_bytes!("../../../assets/gen/knob_small.png");
@@ -33,11 +34,7 @@ pub const SCREWS: [&[u8]; 4] = [
     include_bytes!("../../../assets/screw_4.png"),
 ];
 
-/// Where the indicator points in each render, in degrees clockwise from twelve
-/// o'clock. The renders are square and centred on the shaft with the indicator
-/// already at twelve, so there is nothing left to calibrate.
-pub const KNOB_LARGE_REST: f32 = 0.0;
-pub const KNOB_SMALL_REST: f32 = 0.0;
+/// The shaft's position in every render: square, and centred on it.
 pub const CENTRE: (f32, f32) = (0.5, 0.5);
 
 /// A rotating control cannot be drawn by turning one image: that turns its
@@ -45,7 +42,6 @@ pub const CENTRE: (f32, f32) = (0.5, 0.5);
 /// staying where the panel light is. Each frame is rendered separately with
 /// the light fixed, and drawing picks one.
 pub const KNOB_FRAMES: usize = 48;
-pub const KNOB_ARC: f32 = SWEEP;
 
 /// The meter's geometry, measured off the photograph rather than estimated.
 ///
@@ -109,26 +105,27 @@ pub struct Placement {
     pub pivot: (f32, f32),
 }
 
-/// A lazily uploaded image. The canvas is only reachable from `draw`, so the
-/// upload happens on the first frame and the id is kept from then on.
-#[derive(Default)]
+/// One image, uploaded lazily. The canvas is only reachable from `draw`, so
+/// the upload happens on the first frame and the id is kept from then on.
 pub struct Sprite {
+    bytes: &'static [u8],
     id: Cell<Option<vg::ImageId>>,
 }
 
 impl Sprite {
-    pub const fn new() -> Self {
+    pub const fn new(bytes: &'static [u8]) -> Self {
         Self {
+            bytes,
             id: Cell::new(None),
         }
     }
 
-    fn id(&self, canvas: &mut Canvas, bytes: &[u8]) -> Option<vg::ImageId> {
+    fn id(&self, canvas: &mut Canvas) -> Option<vg::ImageId> {
         if let Some(id) = self.id.get() {
             return Some(id);
         }
         // Mipmaps keep the controls from crawling when the window is scaled.
-        match canvas.load_image_mem(bytes, vg::ImageFlags::GENERATE_MIPMAPS) {
+        match canvas.load_image_mem(self.bytes, vg::ImageFlags::GENERATE_MIPMAPS) {
             Ok(id) => {
                 self.id.set(Some(id));
                 Some(id)
@@ -141,15 +138,8 @@ impl Sprite {
     ///
     /// No rotation is applied: the frame was rendered at the angle wanted, so
     /// its highlights and shadow sit where the panel light put them.
-    pub fn draw_frame(
-        &self,
-        canvas: &mut Canvas,
-        bytes: &[u8],
-        at: Placement,
-        frame: usize,
-        frames: usize,
-    ) {
-        let Some(id) = self.id(canvas, bytes) else {
+    pub fn draw_frame(&self, canvas: &mut Canvas, at: Placement, frame: usize, frames: usize) {
+        let Some(id) = self.id(canvas) else {
             return;
         };
         let Ok((iw, ih)) = canvas.image_size(id) else {
@@ -169,22 +159,14 @@ impl Sprite {
         path.rect(0.0, 0.0, w, h);
         canvas.fill_path(
             &path,
-            &vg::Paint::image(
-                id,
-                0.0,
-                -(frame as f32) * h,
-                w,
-                h * strip as f32,
-                0.0,
-                1.0,
-            ),
+            &vg::Paint::image(id, 0.0, -(frame as f32) * h, w, h * strip as f32, 0.0, 1.0),
         );
         canvas.restore();
     }
 
     /// Draws the photograph with its shaft on a point, turned by `degrees`.
-    pub fn draw(&self, canvas: &mut Canvas, bytes: &[u8], at: Placement) {
-        let Some(id) = self.id(canvas, bytes) else {
+    pub fn draw(&self, canvas: &mut Canvas, at: Placement) {
+        let Some(id) = self.id(canvas) else {
             return;
         };
         let Ok((iw, ih)) = canvas.image_size(id) else {
@@ -204,8 +186,8 @@ impl Sprite {
     }
 
     /// Draws it upright, stretched to fill a rectangle.
-    pub fn draw_rect(&self, canvas: &mut Canvas, bytes: &[u8], x: f32, y: f32, w: f32, h: f32) {
-        let Some(id) = self.id(canvas, bytes) else {
+    pub fn draw_rect(&self, canvas: &mut Canvas, x: f32, y: f32, w: f32, h: f32) {
+        let Some(id) = self.id(canvas) else {
             return;
         };
         let mut path = vg::Path::new();
@@ -214,10 +196,24 @@ impl Sprite {
     }
 }
 
-impl Sprite {
-    /// Draws a switch cap in its bezel. The photographed caps come in two
-    /// colours, and the pressed one also sits lower in its bezel.
-    pub fn draw_button(
+/// A switch cap, photographed out and in. Two sprites, because they are two
+/// images.
+pub struct Cap {
+    out: Sprite,
+    pressed: Sprite,
+}
+
+impl Cap {
+    pub const fn new() -> Self {
+        Self {
+            out: Sprite::new(CAP_OUT),
+            pressed: Sprite::new(CAP_IN),
+        }
+    }
+
+    /// Draws the cap in its bezel. The photographed caps come in two colours,
+    /// and the pressed one also sits lower in its bezel.
+    pub fn draw(
         &self,
         canvas: &mut Canvas,
         b: nih_plug_vizia::vizia::prelude::BoundingBox,
@@ -259,7 +255,13 @@ impl Sprite {
             canvas.fill_path(&shadow, &vg::Paint::color(ink));
         }
 
-        let bytes = if pressed { CAP_IN } else { CAP_OUT };
-        self.draw_rect(canvas, bytes, x, y, w, h);
+        let sprite = if pressed { &self.pressed } else { &self.out };
+        sprite.draw_rect(canvas, x, y, w, h);
+    }
+}
+
+impl Default for Cap {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -37,6 +37,12 @@ for arg in "$@"; do
 done
 
 if [ "$build" = true ]; then
+    # Bundling writes into the bundle folders without emptying them first, so
+    # anything left from another build -- a Windows binary cross-compiled into
+    # the same VST3, say -- would be installed along with this one.
+    for plugin in "${PLUGINS[@]}"; do
+        rm -rf "${bundled:?}/$plugin.clap" "${bundled:?}/$plugin.vst3"
+    done
     echo "Building the Comp76Fx plugins..."
     package_args=()
     for package in "${PACKAGES[@]}"; do
@@ -68,9 +74,13 @@ for plugin in "${PLUGINS[@]}"; do
 done
 
 # The plugin is under the GPL, so the licence and the dependency notices travel
-# with it rather than only living in the source tree.
+# with it rather than only living in the source tree. The vendor folder is
+# shared with other plugins, each with notices of its own, so these go in
+# under this plugin's name instead of over theirs.
 for dir in "$clap_dir" "$vst3_dir"; do
     for doc in LICENSE THIRD-PARTY-NOTICES.md; do
-        [ -e "$project_dir/$doc" ] && cp "$project_dir/$doc" "$dir/"
+        if [ -e "$project_dir/$doc" ]; then
+            cp "$project_dir/$doc" "$dir/Comp76Fx-$doc"
+        fi
     done
 done

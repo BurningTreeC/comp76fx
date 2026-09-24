@@ -5,23 +5,12 @@
 //! loudest, dirtiest and least accurate of the three: the ratios do not quite
 //! reach their marked values, and the noise floor is audibly higher. That is
 //! the sound people go looking for.
+//!
+//! The circuit values are [`comp76fx_core::dsp::REV_A`], kept in the core so
+//! the tests measure exactly what ships.
 
-use comp76fx_core::dsp::{Finish, OutputStage, Revision};
+use comp76fx_core::dsp::REV_A;
 use comp76fx_core::export_revision;
-
-const REV_A: Revision = Revision {
-    name: "Rev A",
-    slug: "comp76fx-rev-a",
-    finish: Finish::BlueStripe,
-    stage: OutputStage::ClassA,
-    amp_drive: 0.62,
-    fet_drive: 1.55,
-    fet_bias: 0.30,
-    // No low noise circuit yet, and it shows.
-    noise_floor_db: -86.0,
-    // The early sidechain undershoots its markings.
-    ratio_accuracy: 0.88,
-};
 
 export_revision! {
     name: "Comp76Fx Rev A",

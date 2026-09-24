@@ -1,23 +1,24 @@
 //! The strip above the panel and the settings it opens.
 //!
 //! None of this is on the hardware, so it is deliberately kept out of the way:
-//! a thin dark header with a single button, and a panel behind it holding the
-//! window scale, the oversampling quality and the amplifier's drive and output
-//! trim.
+//! a thin dark header carrying the preset list, a save button and a settings
+//! button, and a panel behind that holding the window scale, the oversampling
+//! quality and the dry blend.
 
 // Views are constructed with `new` returning a `Handle`, which is how vizia
 // widgets are written throughout, including NIH-plug's own.
 #![allow(clippy::new_ret_no_self)]
 
 use nih_plug::prelude::{Param, ParamPtr, Params};
+use nih_plug_vizia::assets;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 use nih_plug_vizia::widgets::RawParamEvent;
-use nih_plug_vizia::assets;
 
 use super::style::*;
 use super::widgets::Knob;
 use super::{label_box, track_out, Panel, Place};
+use crate::dsp::Revision;
 use crate::presets::{self, Preset};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -100,8 +101,8 @@ pub struct UiState {
     /// What went wrong with the last save, if anything.
     pub error: String,
     pub params: Arc<crate::params::Comp76Params>,
-    /// Folder this plugin saves its presets into, from the revision.
-    pub slug: &'static str,
+    /// Which revision this is, which decides the folder its presets live in.
+    pub revision: Revision,
     /// The door back to the host. Choosing a size has to ask it to resize the
     /// window, and this is the only thing that can. See `editor::apply_scale`.
     gui: Arc<dyn nih_plug::prelude::GuiContext>,
@@ -133,10 +134,10 @@ impl UiState {
     pub fn new(
         scale: f64,
         params: Arc<crate::params::Comp76Params>,
-        slug: &'static str,
+        revision: Revision,
         gui: Arc<dyn nih_plug::prelude::GuiContext>,
     ) -> Self {
-        let presets = presets::load_all(&params, slug);
+        let presets = presets::load_all(&params, &revision);
         // A reopened session remembers which preset it was set from, so pick
         // its values back up to compare against.
         let saved = params.preset_name();
@@ -170,7 +171,7 @@ impl UiState {
             error: String::new(),
             params,
             gui,
-            slug,
+            revision,
         }
     }
 
@@ -194,9 +195,9 @@ impl UiState {
             return;
         }
         let preset = presets::capture(&self.params, &name);
-        match presets::save(&preset, self.slug) {
+        match presets::save(&preset, &self.revision) {
             Ok(_) => {
-                self.presets = presets::load_all(&self.params, self.slug);
+                self.presets = presets::load_all(&self.params, &self.revision);
                 self.reference = preset.values.clone();
                 self.params.set_preset_name(&name);
                 self.current = name;
@@ -279,9 +280,9 @@ impl Model for UiState {
                         .iter()
                         .any(|preset| !preset.built_in && preset.name == name);
                     if ours {
-                        match presets::delete(&name, self.slug) {
+                        match presets::delete(&name, &self.revision) {
                             Ok(()) => {
-                                self.presets = presets::load_all(&*self.params, self.slug);
+                                self.presets = presets::load_all(&*self.params, &self.revision);
                                 // Nothing is loaded any more if what was
                                 // loaded has just been thrown away.
                                 if self.current == name {
@@ -334,6 +335,15 @@ impl Model for UiState {
                     }
                 }
             }
+            // The name box is the only thing in the panel that types, and it
+            // exists exactly while the save dialog does. On Windows this is
+            // what gets it the keyboard: a host's message loop sees every key
+            // before the plugin, and some keep the letters for their own
+            // shortcuts, so a box that took Delete and the arrows could not
+            // be typed into. See `vendor/baseview/src/win/text_input.rs`.
+            // Every other platform ignores it, and repeating an unchanged
+            // state does nothing, so it is simply kept in step here.
+            baseview::set_text_input(self.dialog == Dialog::Name);
             meta.consume();
         });
     }
@@ -412,14 +422,7 @@ impl View for Header {
         bar.rect(b.x, b.y, b.w, b.h);
         canvas.fill_path(
             &bar,
-            &vg::Paint::linear_gradient(
-                b.x,
-                b.y,
-                b.x,
-                b.y + b.h,
-                rgb(0x1d2125),
-                rgb(0x0d0f12),
-            ),
+            &vg::Paint::linear_gradient(b.x, b.y, b.x, b.y + b.h, rgb(0x1d2125), rgb(0x0d0f12)),
         );
         let mut edge = vg::Path::new();
         edge.move_to(b.x, b.y + b.h - 0.5);
@@ -538,7 +541,8 @@ struct Dismiss {
 
 impl Dismiss {
     fn new(cx: &mut Context, shaded: bool) -> Handle<'_, Self> {
-        Self { shaded }.build(cx, |_| {})
+        Self { shaded }
+            .build(cx, |_| {})
             .position_type(PositionType::SelfDirected)
             .left(Pixels(0.0))
             .top(Pixels(0.0))
@@ -674,7 +678,12 @@ impl View for ScaleButton {
     fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
         let b = cx.bounds();
         field(canvas, b, cx.scale_factor());
-        caret(canvas, b.x + b.w - 16.0 * cx.scale_factor(), b.y + b.h / 2.0, cx.scale_factor());
+        caret(
+            canvas,
+            b.x + b.w - 16.0 * cx.scale_factor(),
+            b.y + b.h / 2.0,
+            cx.scale_factor(),
+        );
     }
 
     fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
@@ -794,7 +803,7 @@ impl View for MenuItem {
 /// A segmented row, one segment per oversampling factor.
 fn oversampling_row(cx: &mut Context, width: f32, y: f32) {
     let ptr = Panel::params.get(cx).oversampling.as_ptr();
-    Segments::new(cx, width)
+    Segments::new(cx)
         .position_type(PositionType::SelfDirected)
         .left(Pixels(PANEL_WIDTH - 14.0 - width))
         .top(Pixels(y + 8.0 - ROW_H / 2.0))
@@ -826,18 +835,16 @@ fn oversampling_row(cx: &mut Context, width: f32, y: f32) {
 /// Draws the segmented control and marks the selected factor.
 struct Segments {
     param: nih_plug_vizia::widgets::param_base::ParamWidgetBase,
-    width: f32,
 }
 
 impl Segments {
-    fn new(cx: &mut Context, width: f32) -> Handle<'_, Self> {
+    fn new(cx: &mut Context) -> Handle<'_, Self> {
         Self {
             param: nih_plug_vizia::widgets::param_base::ParamWidgetBase::new(
                 cx,
                 Panel::params,
                 |p| &p.oversampling,
             ),
-            width,
         }
         .build(cx, |_| {})
     }
@@ -861,7 +868,6 @@ impl View for Segments {
             3.0 * scale,
         );
         canvas.fill_path(&pill, &vg::Paint::color(rgba(0x4a7c8c, 0.75)));
-        let _ = self.width;
     }
 
     fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
@@ -926,7 +932,6 @@ fn caret(canvas: &mut Canvas, x: f32, y: f32, scale: f32) {
         &vg::Paint::color(rgb(0x9eacb8)).with_line_width(1.6 * scale),
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // Presets
@@ -1060,7 +1065,18 @@ impl PresetMenu {
 
         Self.build(cx, move |cx| {
             if names.is_empty() {
-                label_box(cx, "no presets", PRESET_W / 2.0, 4.0 + ROW_H / 2.0, 11.0, PRESET_W, 0x7e, 0x8a, 0x96, 255);
+                label_box(
+                    cx,
+                    "no presets",
+                    PRESET_W / 2.0,
+                    4.0 + ROW_H / 2.0,
+                    11.0,
+                    PRESET_W,
+                    0x7e,
+                    0x8a,
+                    0x96,
+                    255,
+                );
             }
 
             for column in 0..columns {
@@ -1128,7 +1144,13 @@ struct PresetScrollBar {
 
 impl PresetScrollBar {
     fn new(cx: &mut Context, scroll: usize, rows: usize, visible: usize) -> Handle<'_, Self> {
-        Self { scroll, rows, visible }.build(cx, |_| {}).hoverable(false)
+        Self {
+            scroll,
+            rows,
+            visible,
+        }
+        .build(cx, |_| {})
+        .hoverable(false)
     }
 }
 
@@ -1183,7 +1205,18 @@ impl PresetItem {
                     .font_size(11.5)
                     .color(Color::rgb(0xe4, 0xea, 0xf0));
                 if built_in {
-                    label_box(cx, "factory", PRESET_W - 44.0, ROW_H / 2.0, 9.0, 60.0, 0x76, 0x86, 0x92, 255);
+                    label_box(
+                        cx,
+                        "factory",
+                        PRESET_W - 44.0,
+                        ROW_H / 2.0,
+                        9.0,
+                        60.0,
+                        0x76,
+                        0x86,
+                        0x92,
+                        255,
+                    );
                 } else {
                     DeleteButton::new(cx, index);
                 }
@@ -1348,7 +1381,6 @@ impl View for SaveButton {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Dialogs
 // ---------------------------------------------------------------------------
@@ -1386,9 +1418,9 @@ impl Dialogs {
                         .border_radius(Pixels(4.0))
                         .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
                         .font_size(12.0)
+                        // The caret and selection colours are in
+                        // `style::STYLESHEET`: set here, the caret never blinks.
                         .color(Color::rgb(0xf0, 0xf3, 0xf6))
-                        .caret_color(Color::rgb(0xd0, 0xd8, 0xde))
-                        .selection_color(Color::rgba(0x4a, 0x7c, 0x8c, 0xaa))
                         .on_edit(|cx, text| cx.emit(UiEvent::NameEdited(text)))
                         // The flag is true only when the field was submitted
                         // with the enter key. Losing focus also submits, with
@@ -1407,7 +1439,18 @@ impl Dialogs {
                     Binding::new(cx, UiState::error, |cx, error| {
                         let error = error.get(cx);
                         if !error.is_empty() {
-                            label_box(cx, &error, DIALOG_W / 2.0, 112.0, 10.0, DIALOG_W - 40.0, 0xe0, 0x86, 0x78, 255);
+                            label_box(
+                                cx,
+                                &error,
+                                DIALOG_W / 2.0,
+                                112.0,
+                                10.0,
+                                DIALOG_W - 40.0,
+                                0xe0,
+                                0x86,
+                                0x78,
+                                255,
+                            );
                         }
                     });
 
@@ -1424,7 +1467,8 @@ impl Dialogs {
                 DialogCard::new(cx, |cx| {
                     dialog_title(cx, "REPLACE PRESET");
                     Binding::new(cx, UiState::name, |cx, name| {
-                        let message = format!("\u{201c}{}\u{201d} already exists.", name.get(cx).trim());
+                        let message =
+                            format!("\u{201c}{}\u{201d} already exists.", name.get(cx).trim());
                         dialog_text(cx, &message, 58.0);
                     });
                     dialog_text(cx, "Saving will replace it.", 80.0);

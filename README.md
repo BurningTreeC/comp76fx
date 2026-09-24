@@ -27,8 +27,16 @@ g = -k / (1 + k) * (input - threshold)
 ```
 
 so the slope is `1 / (1 + k)` and the ratio is simply `1 + k`. The 4:1 button
-is `k = 3`; the 20:1 button is `k = 19`. The soft knee everyone describes is
-not dialled in anywhere, it is what a feedback loop does.
+is `k = 3`; the 20:1 button is `k = 19`. What the feedback buys is ratios that
+land on their markings; it does not soften the knee. A loop closed around a
+rectifier with a definite threshold settles on a curve with the same hard
+corner, and the single buttons here have one. The one wide knee in the model
+is the one all-button mode opens.
+
+The loop is solved within each sample rather than run a sample behind itself.
+Running it behind is a correction the size of the open loop gain, and at the
+fastest attack that overshot the settling point on every transient, by as
+much as 20 dB without oversampling, and held the excess for the whole release.
 
 * **The gain element is a FET** used as a voltage controlled resistor, and it
   distorts the audio passing through it increasingly as it is pulled down.
@@ -48,25 +56,29 @@ not dialled in anywhere, it is what a feedback loop does.
   shape, which is why it lands between 12:1 and 20:1 and keeps climbing the
   harder the unit is driven.
 
-Measured by the tests in `core/tests/compression.rs`:
+Measured by `cargo run --release -p comp76fx_core --example bench -- --spec`
+and the tests in `core/tests/compression.rs`:
 
 | | |
 | --- | --- |
 | 4:1 button | 4.02:1 |
 | 8:1 button | 8.07:1 |
 | 12:1 button | 12.12:1 |
-| 20:1 button | 20.23:1 |
-| all four in | 15.5:1 driven, 13.1:1 gently |
+| 20:1 button | 20.22:1 |
+| all four in | 19.5:1 driven, 16.4:1 gently |
 | no buttons in | exactly 1:1, colour with no gain reduction |
 | attack | 19.5 µs to 794 µs against a marked 20 µs to 800 µs |
 | release | 50.0 ms to 1100 ms against a marked 50 ms to 1.1 s |
 | distortion, idle at −18 dBFS | Rev A 0.48 %, Rev D 0.33 %, Rev F 0.05 % |
 | frequency response | within 0.53 dB across 20 Hz to 20 kHz |
-| signal to noise | 97 dB, 107 dB and 109 dB |
+| signal to noise | Rev A 91 dB, Rev D 101 dB, Rev F 103 dB, at every oversampling setting |
+| latency | 74 samples at every oversampling setting, dry blend included |
 
 `core/tests/calibration.rs` holds the published figures to those tolerances,
-including the response at every sample rate and oversampling setting, and the
-meter's needle against the marks printed on its own face.
+including the response at every sample rate and oversampling setting, the ends
+of the dials, and the meter's needle against the marks printed on its own
+face. `core/tests/latency.rs` holds the reported latency to the real one and
+the dry blend in line with the wet signal.
 
 Two of those are worth reading twice. All-button mode has no single ratio: its
 knee is wide enough that the slope is still opening out at light reduction, so
@@ -80,23 +92,30 @@ lands a percent low, and the two nearly cancel.
 
 The panel is the hardware's. **Input** drives the signal against a fixed
 operating point, which is how the unit is threshold-less; **output** is
-make-up. Attack and release are marked slowest to fastest, which is backwards
-from most compressors and is how the originals were engraved.
+make-up. Attack and release are engraved 1 to 7, slowest to fastest, which is
+backwards from most compressors and is how the originals were engraved; 1 is
+800 µs and 1.1 s, 7 is 20 µs and 50 ms.
 
 The four **ratio** switches are mechanically interlocked, so clicking one
 releases the others. **Hold shift or ctrl to latch**, which is how you get all
 four in at once without having to be quick with your fingers.
 
 The **meter** switch selects gain reduction, output level referenced to +4 or
-+8, or off.
++8, or off. The output positions read the average level, referred to a sine,
+so a tone peaking at −18 dBFS sits on 0 VU at +4.
 
 The strip above the panel is not on the hardware. It carries the preset drop
 down, a save button and the settings button, which holds the window scale
-(50 % to 200 %), the oversampling quality and the dry blend.
+(50 % to 200 %), the oversampling quality and the dry blend. The plugin reports
+the same latency at every oversampling setting, and the dry blend and the
+power switch are delayed to match, so neither moves the track against the rest
+of the session.
 
 Saved presets are one JSON file each, under a folder of the revision's own so
-the three do not share, and each carries a cross to delete it that asks before
-removing the file. A built-in preset has no file, so it cannot be deleted, and
+the three do not share: `~/.config/comp76fx-rev-a/presets` on Linux and macOS
+(or under `$XDG_CONFIG_HOME`), and `%APPDATA%\Comp76Fx Rev A\Presets` on
+Windows. Each carries a cross to delete it that asks before removing the file.
+Saving under the name of one of your own, in any capitalisation, replaces it. A built-in preset has no file, so it cannot be deleted, and
 saving under its name writes a preset of your own beside it rather than
 replacing it in the list; replacing it would put it out of reach for good.
 
@@ -145,10 +164,13 @@ python3 tools/third-party-notices.py
 
 | Path | |
 | --- | --- |
-| `core/src/dsp/detector.rs` | the feedback sidechain and its timing |
+| `core/src/dsp/detector.rs` | the feedback sidechain, its timing and the loop solver |
+| `core/src/dsp/revisions.rs` | the circuit values of the three revisions |
 | `core/src/dsp/fet.rs` | the gain element and its distortion |
 | `core/src/dsp/amp.rs` | the Class A and Class AB output stages |
 | `core/src/editor/` | the front panel |
 | `core/src/presets.rs` | built-in and saved presets |
-| `rev_a`, `rev_d`, `rev_f` | one identity each; the circuit differences live in `Revision` |
+| `rev_a`, `rev_d`, `rev_f` | one identity each: names and plugin ids |
 | `core/tests/compression.rs` | the measurements above |
+| `core/tests/latency.rs` | reported latency and the dry blend's alignment |
+| `vendor/baseview` | the GUI window backend, patched for Windows; see its `PATCHES.md` |
