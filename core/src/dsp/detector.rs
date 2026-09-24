@@ -6,10 +6,12 @@
 //! than by a curve, and why the buttons land on their markings.
 //!
 //! It does not, on its own, soften the knee. A loop closed around a rectifier
-//! with a definite threshold settles on a static curve with the same hard
-//! corner: at 4:1 the reduction is three quarters of the overshoot from the
-//! first decibel over. The one knee in the model is the one all-button mode
-//! opens, below.
+//! with a definite threshold settles on a static curve with the same corner.
+//! The softness is in the rectifier: its diodes are biased to make the
+//! threshold, and a diode turns on over a span of voltage rather than at a
+//! point. That span is the same for every button, so it is widest in decibels
+//! where the signal at the diodes is smallest, which is the 4:1 -- the one
+//! ratio the manual says has a soft knee. See [`super::diode_knee_db`].
 //!
 //! With `k` as the sidechain's gain, the static solution of the loop is
 //!
@@ -37,8 +39,10 @@ pub const ATTACK_SLOWEST: f64 = 800e-6;
 pub const RELEASE_FASTEST: f64 = 50e-3;
 pub const RELEASE_SLOWEST: f64 = 1.1;
 
-/// The fixed operating point the input knob drives the signal against. The
-/// hardware has no threshold control; you set how hard you hit this instead.
+/// The fixed operating point the input knob drives the signal against, for
+/// the 20:1 button; the others sit a little below it, see
+/// [`super::THRESHOLD_OFFSETS_DB`]. The hardware has no threshold control;
+/// you set how hard you hit this instead.
 pub const THRESHOLD_DB: f64 = -24.0;
 
 /// Where the sidechain amplifier begins to run out of rail, and the most it
@@ -84,15 +88,16 @@ pub struct Timing {
     pub k: f64,
     pub attack: f64,
     pub release: f64,
-    /// Where the sidechain starts working, in dBFS. Fixed on the hardware,
-    /// except that all-button mode moves it: four ratio resistors in parallel
-    /// is more sidechain gain than any one of them, and the bias shift has the
-    /// FET part way on before the signal arrives.
+    /// Where the sidechain starts working, in dBFS. Set by the ratio button,
+    /// and moved further by a combination of them: several ratio resistors in
+    /// parallel is more sidechain gain than any one of them, and the bias
+    /// shift has the FET part way on before the signal arrives.
     pub threshold: f64,
-    /// Width of the knee, in dB. Zero everywhere except all-button mode,
-    /// where the shifted bias makes the sidechain come on gradually instead
-    /// of at a definite point, which is what lets the leading edge of a
-    /// transient through before the gain collapses behind it.
+    /// Width of the knee, in dB. The rectifier diodes give every button one,
+    /// narrow at 20:1 and several decibels wide at 4:1; a combination opens
+    /// it much further, which makes the sidechain come on gradually and lets
+    /// the leading edge of a transient through before the gain collapses
+    /// behind it.
     pub knee: f64,
 }
 
@@ -285,7 +290,9 @@ impl Detector {
 /// How far above the operating point the rectifier sees, softened over a knee.
 ///
 /// A hard corner would be a definite point at which the unit starts working.
-/// Widening it is what all-button mode does: the sidechain comes on gradually,
+/// The rectifier diodes round it off a little at every button and a good deal
+/// at 4:1. Widening it much further is what all-button mode does: the
+/// sidechain comes on gradually,
 /// so the front of a transient is through before there is much gain reduction
 /// behind it. It has to be done here, as a curve, and not by delaying the
 /// control voltage: a transport delay inside a loop with this much gain does

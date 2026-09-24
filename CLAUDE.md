@@ -58,13 +58,13 @@ The workspace is `cargo fmt` clean, and CI runs `cargo fmt --all --check` before
 
 **Signal path** (`core/src/dsp/`). `Channel::process` runs one sample through the oversampler closure in this order:
 1. `Fet::process`, applying the reduction the detector asked for last.
-2. `Amplifier::process`: coupling high-pass, Class A or AB shaper, bandwidth low-pass.
-3. Revision noise is added, scaled by √factor so the in-band floor is the same at every oversampling setting.
-4. `Detector::process_in_loop` sees that output and returns the next reduction.
+2. `Detector::process_in_loop` is fed the FET output (the hardware's preamp output) through a 5 Hz DC-blocking coupling (`SIDECHAIN_COUPLING_HZ`), and returns the next reduction. The output stage is outside the loop, as on the hardware; `the_output_stage_is_outside_the_loop` checks it.
+3. `Amplifier::process`: coupling high-pass, Class A or AB shaper, bandwidth low-pass.
+4. Revision noise is added, scaled by √factor so the in-band floor is the same at every oversampling setting.
 
 After the oversampler, a `Delay` pads the output to the constant `dsp::LATENCY` (74 samples, the 8x figure), so the latency is the same at every oversampling setting. Input and output gains are computed in `apply_controls`, not per sample. With no ratio button in, the gain element and the detector are bypassed, and the detector is reset.
 
-The detector works in dB: demand = `limit(k · knee(level − threshold))`, then an attack follower and a two-stage release. The static ratio is `1 + k`. `process_in_loop` finds each sample's demand together with the reduction that demand causes, using a safeguarded Newton solve of `d = demand(unreduced − landing(d))`. Computing the demand one sample behind instead made fast attacks overshoot by up to 20 dB. `Detector::process` is the open-loop network alone; the calibration tests use it to check the times marked on the panel. Pressed buttons add their `k` values (parallel conductances). How many buttons are pressed sets the bias shift, the threshold offset and the knee width. The single buttons have a hard knee. All four pressed also rescales attack and release. The tuning constants carry comments explaining their calibration. `RELEASE_COMPENSATION` must be re-solved whenever `SLOW_STAGE_SHARE` or `SLOW_STAGE_RATIO` changes; `release_compensation_is_solved` checks it.
+The detector works in dB: demand = `limit(k · knee(level − threshold))`, then an attack follower and a two-stage release. The static ratio is `1 + k`. `process_in_loop` finds each sample's demand together with the reduction that demand causes, using a safeguarded Newton solve of `d = demand(unreduced − landing(d))`. Computing the demand one sample behind instead made fast attacks overshoot by up to 20 dB. `Detector::process` is the open-loop network alone; the calibration tests use it to check the times marked on the panel. Pressed buttons add their `k` values (parallel conductances). Each button has its own threshold (`THRESHOLD_OFFSETS_DB`, from the 1176LN manual: 20:1 at `THRESHOLD_DB`, each lower ratio 1 dB below) and a diode knee (`diode_knee_db`). The knee is 0.5 dB wide at 20:1 and scales with the inverse of the signal at the rectifier diodes (∝ k·threshold), so it is about 4.5 dB at 4:1. A combination's threshold is the k-weighted mean of the pressed buttons'. How many buttons are pressed also sets the bias shift, a further threshold drop and extra knee width. All four pressed also rescales attack and release. The tuning constants carry comments explaining their calibration. `RELEASE_COMPENSATION` must be re-solved whenever `SLOW_STAGE_SHARE` or `SLOW_STAGE_RATIO` changes; `release_compensation_is_solved` checks it.
 
 **Plugin body** (`core/src/plugin.rs`).
 - Controls are read from the parameter smoothers once per 32-sample block (`CONTROL_BLOCK`). Sample-accurate automation is off.
@@ -96,6 +96,8 @@ The detector works in dB: demand = `limit(k · knee(level − threshold))`, then
 - `core/tests/compression.rs`: bench-style measurements of ratio, timing, THD and the differences between revisions.
 - `core/tests/calibration.rs`: detector timing, dial ends, noise floor against oversampling, VU needle geometry, frequency response at every rate and factor.
 - `core/tests/latency.rs`: the reported latency equals the real one at every factor; the dry blend doesn't comb; power off keeps the timing.
+- `core/tests/threshold.rs`: the 1176LN manual's own ratio test (§13 of its calibration procedure), each button's threshold and knee, and the sidechain tap.
+- `the_built_in_presets_come_back_at_unity`: every built-in preset except Parallel Smash returns a −18 dBFS tone at unity. Anything that changes how hard a ratio works has to re-trim their output values.
 - `core/tests/scaling.rs`: window-size persistence.
 - `cargo run --release -p comp76fx_core --example bench -- --spec` checks against the published spec and prints the figures quoted in the README's measurement table. Re-run it and update the table when the DSP changes.
 

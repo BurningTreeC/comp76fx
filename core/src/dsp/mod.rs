@@ -10,6 +10,7 @@ pub mod fet;
 pub mod oversample;
 pub mod revisions;
 
+use amp::OnePole;
 pub use amp::{Amplifier, OutputStage};
 pub use delay::Delay;
 pub use detector::{Detector, Timing};
@@ -26,6 +27,51 @@ pub const LATENCY: u32 = oversample::MAX_LATENCY;
 
 /// Ratios the four front panel buttons select.
 pub const RATIOS: [f64; 4] = [4.0, 8.0, 12.0, 20.0];
+
+/// Where each button puts the threshold, in dB relative to the 20:1's
+/// [`detector::THRESHOLD_DB`], in the order of [`RATIOS`].
+///
+/// The buttons switch a DC divider that biases the rectifier diodes as well
+/// as the signal divider that feeds them, so each ratio has a threshold of its
+/// own, and the manual says so: "selecting higher ratios also raises the
+/// threshold level". Its table puts the input at minimum threshold at -24,
+/// -25 and -26 dB for 20:1, 12:1 and 8:1. For 4:1 it gives no figure, because
+/// that knee is too soft to have one, but the output at threshold falls a
+/// decibel a step down the table (+10, +9, +8, +7 dBm), which puts the 4:1 a
+/// decibel below the 8:1.
+pub const THRESHOLD_OFFSETS_DB: [f64; 4] = [-3.0, -2.0, -1.0, 0.0];
+
+/// Width of the knee the rectifier diodes give the 20:1 button, in dB at the
+/// rectifier. The other buttons are wider; see [`diode_knee_db`].
+///
+/// A biased diode does not switch on at a point, it turns on over a fixed
+/// span of voltage. How many decibels of signal that span covers depends on
+/// how large the signal at the diodes is at threshold: the bigger it is, the
+/// sharper the corner. That fixes how the buttons' knees compare; the manual
+/// gives no width, so the size of them all is bounded by its ratio test. It
+/// measures each ratio from 1 dB of limiting, except the 4:1, which it
+/// measures from 3 dB "because of the soft knee in the threshold circuit for
+/// this ratio", and holds each to 20 %. Much wider than this and the 8:1
+/// fails from 1 dB as well; much narrower and the 4:1 would have had no need
+/// of the exception. At half a decibel the 4:1 reads worst of the four from
+/// 1 dB, 12.6 % out on a Rev D, and 3.4 % out from 3; `tests/threshold.rs`
+/// runs the manual's procedure.
+const DIODE_KNEE_DB: f64 = 0.5;
+
+/// Corner of the coupling capacitor the sidechain amplifier is fed through,
+/// in Hz.
+///
+/// The manual has the control amplifier start with a phase inverter fed from
+/// a divider on the preamplifier's output. A transistor stage biased from its
+/// own supply takes its signal through a capacitor, so the rectifier never
+/// sees DC. That matters here because the gain element's even order
+/// distortion leaves a DC offset on the signal, which lifts one half of the
+/// waveform above the other, and the full-wave rectifier follows whichever
+/// peaks higher. With the offset let through, the ratios read up to 6 % high
+/// at 20:1, more the harder the unit worked; blocked, they land within about
+/// a percent of their markings. The value is not given, so it is set low
+/// enough to leave the audio band alone, like the output coupling.
+pub const SIDECHAIN_COUPLING_HZ: f64 = 5.0;
 
 /// What pressing more than one ratio button does.
 ///
@@ -170,6 +216,46 @@ impl Controls {
     fn combination(&self) -> f64 {
         (self.pressed().saturating_sub(1)) as f64 / (RATIOS.len() - 1) as f64
     }
+
+    /// Where the pressed buttons put the threshold, relative to the 20:1's,
+    /// in dB. With several in, their bias taps are in parallel as their
+    /// signal taps are, so each pulls by its conductance -- which is its
+    /// share of the sidechain gain -- and the stiffest has the most say.
+    pub fn threshold_offset_db(&self) -> f64 {
+        let (weighted, total) = RATIOS
+            .iter()
+            .zip(THRESHOLD_OFFSETS_DB)
+            .zip(self.buttons)
+            .filter(|(_, pressed)| *pressed)
+            .fold((0.0, 0.0), |(weighted, total), ((ratio, offset), _)| {
+                let k = ratio - 1.0;
+                (weighted + k * offset, total + k)
+            });
+        if total > 0.0 {
+            weighted / total
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Width of the knee the rectifier diodes give a sidechain gain `k` whose
+/// threshold sits `offset_db` from the 20:1's, in dB.
+///
+/// The diodes' turn-on spans the same voltage whatever the button, so the
+/// knee in decibels widens as the signal at the diodes at threshold shrinks.
+/// That signal is the threshold level times the share of it the ratio
+/// divider passes, which is proportional to `k`. The 4:1 passes the least
+/// and has the lowest threshold, so its signal at the diodes is about a ninth
+/// of the 20:1's and its knee about nine times as wide -- the soft knee the
+/// manual names for that ratio alone.
+pub fn diode_knee_db(k: f64, offset_db: f64) -> f64 {
+    if k <= 0.0 {
+        return 0.0;
+    }
+    let reference = RATIOS[3] - 1.0;
+    let at_diodes = k * db_to_gain(offset_db);
+    DIODE_KNEE_DB * reference / at_diodes
 }
 
 /// One channel of the unit.
@@ -189,6 +275,8 @@ pub struct Channel {
     noise: u32,
     /// Makes the oversampler's latency up to [`LATENCY`] at every setting.
     pad: Delay,
+    /// The capacitor the sidechain amplifier is fed through.
+    coupling: OnePole,
     /// Gains the controls and the oversampling set, worked out when they
     /// change rather than on every sample.
     input_gain: f64,
@@ -212,6 +300,7 @@ impl Channel {
             meter_db: 0.0,
             noise: seed | 1,
             pad: Delay::new(0, LATENCY as usize),
+            coupling: OnePole::default(),
             input_gain: 1.0,
             output_gain: 1.0,
             noise_gain: 0.0,
@@ -242,6 +331,7 @@ impl Channel {
         let internal = self.sample_rate * factor as f64;
         self.detector.set_sample_rate(internal);
         self.amp.set_sample_rate(internal);
+        self.coupling.set_cutoff(SIDECHAIN_COUPLING_HZ, internal);
         self.pad
             .set_delay((LATENCY - self.oversampler.latency()) as usize);
         // The noise is white at the internal rate, and the way back down to
@@ -278,11 +368,9 @@ impl Channel {
 
         let all = self.controls.all_buttons();
         let blend = self.controls.combination();
-        let ratio = self
-            .controls
-            .sidechain_gain()
-            .map(|k| (k * self.revision.ratio_accuracy).max(0.0))
-            .unwrap_or(0.0);
+        let marked = self.controls.sidechain_gain().unwrap_or(0.0);
+        let ratio = (marked * self.revision.ratio_accuracy).max(0.0);
+        let offset = self.controls.threshold_offset_db();
 
         // The bias shift is what makes a combination dirty as well as slow,
         // and it grows with how many buttons are in.
@@ -307,8 +395,8 @@ impl Channel {
                 detector::RELEASE_FASTEST,
                 detector::RELEASE_SLOWEST,
             ) * release_scale,
-            threshold: detector::THRESHOLD_DB - COMBINED_THRESHOLD_DB * blend,
-            knee: COMBINED_KNEE_DB * blend,
+            threshold: detector::THRESHOLD_DB + offset - COMBINED_THRESHOLD_DB * blend,
+            knee: diode_knee_db(marked, offset) + COMBINED_KNEE_DB * blend,
         });
     }
 
@@ -337,22 +425,26 @@ impl Channel {
             reduction_db,
             meter_db,
             noise,
+            coupling,
             ..
         } = self;
 
         let out = oversampler.process(sample as f64 * self.input_gain, &mut |x| {
-            // The gain element runs on what the detector asked for, and the
-            // detector is fed what came out, which is how the loop is closed.
             if !compressing {
                 return amp.process(x) + white(noise) * noise_gain;
             }
+            // The gain element runs on what the detector asked for, and the
+            // detector is fed what came out, which is how the loop is closed.
+            // It is fed from the preamplifier, straight after the gain
+            // element and ahead of the output control and the line amplifier,
+            // which is where the unit's divider takes it: the output stage's
+            // colour is outside the loop, as it is on the hardware.
             let reduced = fet.process(x, -*reduction_db);
-            let amplified = amp.process(reduced) + white(noise) * noise_gain;
-            *reduction_db = detector.process_in_loop(amplified);
+            *reduction_db = detector.process_in_loop(coupling.highpass(reduced));
             if *reduction_db > *meter_db {
                 *meter_db = *reduction_db;
             }
-            amplified
+            amp.process(reduced) + white(noise) * noise_gain
         });
 
         (self.pad.process(out) * self.output_gain) as f32
@@ -363,6 +455,7 @@ impl Channel {
         self.amp.reset();
         self.oversampler.reset();
         self.pad.reset();
+        self.coupling.reset();
         self.reduction_db = 0.0;
         self.meter_db = 0.0;
     }

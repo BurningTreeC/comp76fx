@@ -6,15 +6,16 @@
 //! which is cleaner and more symmetrical but has a crossover region of its own.
 //! Both sit behind a transformer, which rounds the top and softens the bottom.
 
-/// A one pole filter for the band limits of the transformers.
+/// A one pole filter for the band limits of the transformers, and for the
+/// coupling capacitor in front of the sidechain.
 #[derive(Default, Clone, Copy)]
-struct OnePole {
+pub(crate) struct OnePole {
     a: f64,
     z: f64,
 }
 
 impl OnePole {
-    fn set_cutoff(&mut self, freq: f64, sample_rate: f64) {
+    pub(crate) fn set_cutoff(&mut self, freq: f64, sample_rate: f64) {
         // Only the bottom is clamped. Holding the corner below Nyquist looks
         // like caution but does the opposite: at 44.1 kHz it dragged the
         // transformer's 55 kHz corner down to 19.8 kHz, turning a gentle tilt
@@ -34,11 +35,11 @@ impl OnePole {
     }
 
     #[inline]
-    fn highpass(&mut self, x: f64) -> f64 {
+    pub(crate) fn highpass(&mut self, x: f64) -> f64 {
         x - self.lowpass(x)
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.z = 0.0;
     }
 }

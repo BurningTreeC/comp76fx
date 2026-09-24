@@ -25,14 +25,16 @@ const EXCLUDED: &[&str] = &["os", "power"];
 /// parameters, so changing a control's range cannot silently move them.
 ///
 /// Ratio buttons are 1.0 for in and 0.0 for out; all four in is all-button
-/// mode. Attack and release are marked 1 to 7, slowest to fastest.
+/// mode. Attack and release are marked 1 to 7, slowest to fastest. The
+/// output is set so a tone at -18 dBFS comes back at the level it went in,
+/// except where the preset is a blend.
 const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
     (
         // Fast and firm, the setting a vocal usually wants.
         "Vocal 4:1",
         &[
             ("input", 12.0),
-            ("output", 1.5),
+            ("output", 3.8),
             ("attack", 5.0),
             ("release", 4.0),
             ("ratio4", 1.0),
@@ -51,7 +53,7 @@ const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
         "All Buttons In",
         &[
             ("input", 0.0),
-            ("output", 18.5),
+            ("output", 19.3),
             ("attack", 7.0),
             ("release", 7.0),
             ("ratio4", 1.0),
@@ -66,7 +68,7 @@ const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
         "Bass 8:1",
         &[
             ("input", 14.0),
-            ("output", 3.5),
+            ("output", 5.2),
             ("attack", 2.5),
             ("release", 5.0),
             ("ratio4", 0.0),

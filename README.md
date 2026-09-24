@@ -19,8 +19,10 @@ modelled.
 ## What it models
 
 The unit is a **feedback** compressor: the sidechain samples the signal after
-the gain element rather than before it. That is not a detail. With `k` as the
-sidechain's gain, the loop settles at
+the gain element rather than before it. It takes it from the preamplifier,
+straight after the gain element and ahead of the output control and the line
+amplifier, so the output stage's colour is outside the loop. That is not a
+detail. With `k` as the sidechain's gain, the loop settles at
 
 ```
 g = -k / (1 + k) * (input - threshold)
@@ -28,10 +30,21 @@ g = -k / (1 + k) * (input - threshold)
 
 so the slope is `1 / (1 + k)` and the ratio is simply `1 + k`. The 4:1 button
 is `k = 3`; the 20:1 button is `k = 19`. What the feedback buys is ratios that
-land on their markings; it does not soften the knee. A loop closed around a
-rectifier with a definite threshold settles on a curve with the same hard
-corner, and the single buttons here have one. The one wide knee in the model
-is the one all-button mode opens.
+land on their markings. It does not soften the knee on its own: the knee is in
+the threshold circuit.
+
+* **Each ratio has its own threshold.** The buttons switch a DC divider that
+  biases the rectifier diodes along with the signal divider that feeds them,
+  and the manual says "selecting higher ratios also raises the threshold
+  level": −24, −25 and −26 dB for 20:1, 12:1 and 8:1, and the 4:1 a decibel
+  below that.
+* **The knee is softest at 4:1.** A diode turns on over a span of voltage, not
+  at a point, and that span covers the most decibels where the signal at the
+  diodes is smallest. The 4:1 passes the smallest share of the smallest
+  signal, about a ninth of the 20:1's, so its knee is about nine times as
+  wide: the "soft knee in the threshold circuit for this ratio" that the
+  manual measures its ratio test around. The manual gives no width; the size
+  of all four is bounded by that test.
 
 The loop is solved within each sample rather than run a sample behind itself.
 Running it behind is a correction the size of the open loop gain, and at the
@@ -61,11 +74,14 @@ and the tests in `core/tests/compression.rs`:
 
 | | |
 | --- | --- |
-| 4:1 button | 4.02:1 |
+| 4:1 button | 4.04:1 |
 | 8:1 button | 8.07:1 |
 | 12:1 button | 12.12:1 |
-| 20:1 button | 20.22:1 |
-| all four in | 19.5:1 driven, 16.4:1 gently |
+| 20:1 button | 20.26:1 |
+| all four in | 19.2:1 driven, 16.4:1 gently |
+| threshold | 20:1 at −24.0 dBFS; 12:1, 8:1 and 4:1 at −1.0, −2.0 and −3.0 dB from it |
+| knee | reduction already at threshold: 0.16, 0.27, 0.41 and 0.74 dB from 20:1 to 4:1 |
+| the manual's ratio test | 20:1, 12:1 and 8:1 from 1 dB of limiting, 4:1 from 3 dB: all within 12 % against its 20 % |
 | no buttons in | exactly 1:1, colour with no gain reduction |
 | attack | 19.5 µs to 794 µs against a marked 20 µs to 800 µs |
 | release | 50.0 ms to 1100 ms against a marked 50 ms to 1.1 s |
@@ -78,7 +94,8 @@ and the tests in `core/tests/compression.rs`:
 including the response at every sample rate and oversampling setting, the ends
 of the dials, and the meter's needle against the marks printed on its own
 face. `core/tests/latency.rs` holds the reported latency to the real one and
-the dry blend in line with the wet signal.
+the dry blend in line with the wet signal. `core/tests/threshold.rs` runs the
+manual's own ratio test and holds each button's threshold and knee.
 
 Two of those are worth reading twice. All-button mode has no single ratio: its
 knee is wide enough that the slope is still opening out at light reduction, so
@@ -120,7 +137,8 @@ saving under its name writes a preset of your own beside it rather than
 replacing it in the list; replacing it would put it out of reach for good.
 
 Built-in presets include **All Buttons In**: all four switches in, both dials
-wide open, driven hard, with the make-up set so it comes back at unity.
+wide open, driven hard, with the make-up set so a tone at −18 dBFS comes
+back at unity, as every built-in preset but the parallel one does.
 
 ## Building
 
@@ -173,4 +191,5 @@ python3 tools/third-party-notices.py
 | `rev_a`, `rev_d`, `rev_f` | one identity each: names and plugin ids |
 | `core/tests/compression.rs` | the measurements above |
 | `core/tests/latency.rs` | reported latency and the dry blend's alignment |
+| `core/tests/threshold.rs` | the threshold circuit against the manual |
 | `vendor/baseview` | the GUI window backend, patched for Windows; see its `PATCHES.md` |

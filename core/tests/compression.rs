@@ -484,3 +484,39 @@ fn all_buttons_is_dirtier_than_a_plain_ratio() {
         "all-button mode at {all:.2} % is a fuzz box, not an 1176"
     );
 }
+
+/// The built-in presets are set so a tone at -18 dBFS comes back at the level
+/// it went in, whatever they are doing to it. Anything that moves how hard a
+/// ratio works -- its threshold, its knee -- moves them off unity, which this
+/// catches. The parallel preset is a blend by design and is left out.
+#[test]
+fn the_built_in_presets_come_back_at_unity() {
+    for name in ["Vocal 4:1", "All Buttons In", "Bass 8:1"] {
+        let dials = comp76fx_core::presets::built_in_dials(name).expect("a built-in preset");
+        let dial = |id: &str| {
+            dials
+                .iter()
+                .find(|(name, _)| *name == id)
+                .map(|(_, value)| *value)
+                .unwrap_or_else(|| panic!("{name} is missing {id}"))
+        };
+        let controls = Controls {
+            input_db: dial("input") as f64,
+            output_db: dial("output") as f64,
+            attack: dial_position(dial("attack")),
+            release: dial_position(dial("release")),
+            buttons: [
+                dial("ratio4") > 0.5,
+                dial("ratio8") > 0.5,
+                dial("ratio12") > 0.5,
+                dial("ratio20") > 0.5,
+            ],
+        };
+        let gain = steady_output_db(controls, -18.0) + 18.0;
+        println!("{name}: {gain:+.2} dB at -18 dBFS");
+        assert!(
+            gain.abs() < 0.25,
+            "{name} comes back {gain:+.2} dB off unity"
+        );
+    }
+}
