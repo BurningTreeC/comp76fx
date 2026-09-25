@@ -26,11 +26,25 @@ const TRIM_BELOW: f32 = 25.0;
 // Knob
 // ---------------------------------------------------------------------------
 
+/// Share of a knob's sweep an OFF position takes below the lowest mark, on a
+/// knob that has one. The attack control is engraved OFF and then 1 to 7,
+/// eight marks spaced evenly, so OFF takes one step of seven.
+pub const OFF_STEP: f32 = 1.0 / 7.0;
+
 pub struct Knob {
     param: ParamWidgetBase,
+    /// The switch worked by an OFF position past the fully anticlockwise end
+    /// of the dial, on a knob that has one -- the attack control's, which
+    /// switches the limiting off.
+    off: Option<ParamWidgetBase>,
     radius: f32,
     dragging: bool,
     last_y: f32,
+    /// Where along its whole sweep the knob is being moved to, OFF included,
+    /// from `0.0` to `1.0`. Kept here because the OFF position is outside the
+    /// parameter's own range, so the parameter alone cannot say how far past
+    /// the 1 a drag has gone.
+    travel: f32,
     face: Sprite,
 }
 
@@ -47,11 +61,50 @@ impl Knob {
         P: Param + 'static,
         FMap: Fn(&Params) -> &P + Copy + 'static,
     {
+        Self::construct(cx, params, params_to_param, None, radius)
+    }
+
+    /// A knob with an OFF position below its lowest mark, which switches
+    /// `params_to_off` off. Moving the knob back up switches it on again.
+    pub fn with_off_switch<L, Params, P, Q, FMap, GMap>(
+        cx: &mut Context,
+        params: L,
+        params_to_param: FMap,
+        params_to_off: GMap,
+        radius: f32,
+    ) -> Handle<'_, Self>
+    where
+        L: Lens<Target = Params> + Clone,
+        Params: 'static,
+        P: Param + 'static,
+        Q: Param + 'static,
+        FMap: Fn(&Params) -> &P + Copy + 'static,
+        GMap: Fn(&Params) -> &Q + Copy + 'static,
+    {
+        let off = ParamWidgetBase::new(cx, params, params_to_off);
+        Self::construct(cx, params, params_to_param, Some(off), radius)
+    }
+
+    fn construct<L, Params, P, FMap>(
+        cx: &mut Context,
+        params: L,
+        params_to_param: FMap,
+        off: Option<ParamWidgetBase>,
+        radius: f32,
+    ) -> Handle<'_, Self>
+    where
+        L: Lens<Target = Params> + Clone,
+        Params: 'static,
+        P: Param + 'static,
+        FMap: Fn(&Params) -> &P + Copy + 'static,
+    {
         Self {
             param: ParamWidgetBase::new(cx, params, params_to_param),
+            off,
             radius,
             dragging: false,
             last_y: 0.0,
+            travel: 0.0,
             face: Sprite::new(if radius >= TRIM_BELOW {
                 sprites::KNOB_LARGE
             } else {
@@ -69,10 +122,57 @@ impl Knob {
         .height(Pixels(radius * 2.0))
     }
 
-    fn nudge(&self, cx: &mut EventContext, delta: f32) {
-        let current = self.param.unmodulated_normalized_value();
+    /// Where along its whole sweep the knob sits now, OFF included.
+    fn position(&self) -> f32 {
+        let value = self.param.modulated_normalized_value().clamp(0.0, 1.0);
+        match &self.off {
+            None => value,
+            Some(off) if off.modulated_normalized_value() < 0.5 => 0.0,
+            Some(_) => OFF_STEP + value * (1.0 - OFF_STEP),
+        }
+    }
+
+    /// Moves the knob to a point along its whole sweep, working the OFF
+    /// switch as it crosses half way between OFF and the lowest mark.
+    fn move_to(&mut self, cx: &mut EventContext, travel: f32) {
+        self.travel = travel.clamp(0.0, 1.0);
+        let Some(off) = &self.off else {
+            self.param.set_normalized_value(cx, self.travel);
+            return;
+        };
+        let on = self.travel >= OFF_STEP * 0.5;
+        if (off.unmodulated_normalized_value() >= 0.5) != on {
+            off.set_normalized_value(cx, if on { 1.0 } else { 0.0 });
+        }
+        if on {
+            let value = ((self.travel - OFF_STEP) / (1.0 - OFF_STEP)).clamp(0.0, 1.0);
+            self.param.set_normalized_value(cx, value);
+        }
+    }
+
+    fn begin(&self, cx: &mut EventContext) {
+        self.param.begin_set_parameter(cx);
+        if let Some(off) = &self.off {
+            off.begin_set_parameter(cx);
+        }
+    }
+
+    fn end(&self, cx: &mut EventContext) {
+        self.param.end_set_parameter(cx);
+        if let Some(off) = &self.off {
+            off.end_set_parameter(cx);
+        }
+    }
+
+    /// Back to the parameter's default, with any OFF switch on.
+    fn restore_default(&mut self, cx: &mut EventContext) {
+        self.begin(cx);
         self.param
-            .set_normalized_value(cx, (current + delta).clamp(0.0, 1.0));
+            .set_normalized_value(cx, self.param.default_normalized_value());
+        if let Some(off) = &self.off {
+            off.set_normalized_value(cx, 1.0);
+        }
+        self.end(cx);
     }
 
     /// Ends a drag: releases the mouse and closes the gesture with the host.
@@ -86,7 +186,7 @@ impl Knob {
         self.dragging = false;
         cx.release();
         cx.set_active(false);
-        self.param.end_set_parameter(cx);
+        self.end(cx);
     }
 }
 
@@ -100,7 +200,7 @@ impl View for Knob {
         let r = self.radius * cx.scale_factor();
         // Pick the frame rendered at this angle rather than turning one image,
         // which would carry the lighting round with the knob.
-        let position = self.param.modulated_normalized_value().clamp(0.0, 1.0);
+        let position = self.position();
         let frame = (position * (sprites::KNOB_FRAMES - 1) as f32).round() as usize;
         // The render is framed to the body's silhouette and stops dead at its
         // edge, so the knob has to be given the same contact shadow the drawn
@@ -161,10 +261,7 @@ impl View for Knob {
             | WindowEvent::MouseTripleClick(MouseButton::Left) => {
                 if cx.modifiers().command() {
                     self.finish(cx);
-                    self.param.begin_set_parameter(cx);
-                    self.param
-                        .set_normalized_value(cx, self.param.default_normalized_value());
-                    self.param.end_set_parameter(cx);
+                    self.restore_default(cx);
                 } else {
                     // A press while this knob still believes a drag is running
                     // means the button came up somewhere nothing here ever
@@ -184,20 +281,18 @@ impl View for Knob {
                     self.finish(cx);
                     self.dragging = true;
                     self.last_y = cx.mouse().cursory;
+                    self.travel = self.position();
                     cx.capture();
                     cx.focus();
                     cx.set_active(true);
-                    self.param.begin_set_parameter(cx);
+                    self.begin(cx);
                 }
                 meta.consume();
             }
             WindowEvent::MouseDoubleClick(MouseButton::Left)
             | WindowEvent::MouseDown(MouseButton::Right) => {
                 self.finish(cx);
-                self.param.begin_set_parameter(cx);
-                self.param
-                    .set_normalized_value(cx, self.param.default_normalized_value());
-                self.param.end_set_parameter(cx);
+                self.restore_default(cx);
                 meta.consume();
             }
             WindowEvent::MouseUp(MouseButton::Left) => {
@@ -225,15 +320,15 @@ impl View for Knob {
                     let speed = if cx.modifiers().shift() { FINE } else { 1.0 };
                     let delta = (self.last_y - *y) / (DRAG_RANGE * cx.scale_factor()) * speed;
                     self.last_y = *y;
-                    self.nudge(cx, delta);
+                    self.move_to(cx, self.travel + delta);
                     cx.needs_redraw();
                 }
             }
             WindowEvent::MouseScroll(_, y) => {
                 let step = if cx.modifiers().shift() { 0.005 } else { 0.02 };
-                self.param.begin_set_parameter(cx);
-                self.nudge(cx, y * step);
-                self.param.end_set_parameter(cx);
+                self.begin(cx);
+                self.move_to(cx, self.position() + y * step);
+                self.end(cx);
                 cx.needs_redraw();
                 meta.consume();
             }
@@ -473,7 +568,7 @@ impl View for VuMeter {
     fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
         let b = cx.bounds();
         let scale = cx.scale_factor();
-        let lit = self.params.power.value() && self.params.meter.value() != MeterMode::Off;
+        let lit = self.params.powered();
 
         let now = Instant::now();
         // Taken whether or not the meter is lit, so switching it on shows what

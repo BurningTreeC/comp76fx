@@ -41,7 +41,7 @@ pub const R_SMALL: f32 = 34.0;
 pub const SWEEP: f32 = 300.0;
 
 /// The black panels: Rev A and B under the painted band, and the low noise
-/// Rev C to E throughout.
+/// Rev C to G throughout.
 pub const PANEL_TOP: u32 = 0x2a2c2e;
 pub const PANEL_BOTTOM: u32 = 0x141516;
 /// The painted section around the meter that gives the Rev A its nickname.

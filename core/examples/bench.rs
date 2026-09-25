@@ -85,6 +85,7 @@ fn controls(index: Option<usize>, input_db: f64, attack: f64, release: f64) -> C
         output_db: 0.0,
         attack,
         release,
+        limiting: true,
         buttons: match index {
             Some(i) => buttons(i),
             None => [true; 4],
@@ -260,6 +261,7 @@ fn main() {
             output_db: 0.0,
             attack: 0.5,
             release: 0.5,
+            limiting: true,
             buttons: [false; 4],
         };
         let response_at = |hz: f64, fs: f64, os: usize| -> f64 {
@@ -390,21 +392,40 @@ fn main() {
         }
 
         // -- noise ------------------------------------------------------------
+        // Signal to noise at the 20:1's threshold, the manual's way: the
+        // noise's density over 30 Hz to 15.7 kHz through 6 dB/octave slopes,
+        // against a tone at the threshold. The manual works the low noise
+        // units out at 80 dB; the specification sheet asks for 81, and the
+        // manual's own arithmetic from its noise limit gives 80.
         for rev in [revisions::REV_A, revisions::REV_D, revisions::REV_F] {
             let mut ch = Channel::new(rev, FS, 4, 1);
             ch.set_controls(flat);
-            let mut sum = 0.0;
-            let n = FS as usize;
+            let n = FS as usize / 2;
             for _ in 0..n {
-                let y = ch.process(0.0) as f64;
-                sum += y * y;
+                ch.process(0.0);
             }
-            let rms = (sum / n as f64).sqrt();
-            let db = 20.0 * (rms + 1e-30).log10();
+            let y: Vec<f64> = (0..n).map(|_| ch.process(0.0) as f64).collect();
+            let bins = 1000;
+            let power: f64 = (0..bins)
+                .map(|i| {
+                    let w = std::f64::consts::TAU * (1000.0 + 9000.0 * i as f64 / bins as f64) / FS;
+                    let (mut re, mut im) = (0.0, 0.0);
+                    for (k, v) in y.iter().enumerate() {
+                        re += v * (w * k as f64).cos();
+                        im += v * (w * k as f64).sin();
+                    }
+                    re * re + im * im
+                })
+                .sum::<f64>()
+                / bins as f64;
+            let density = power / n as f64 / (FS / 2.0);
+            let in_band = density * std::f64::consts::FRAC_PI_2 * (15_700.0 - 30.0);
+            let threshold_rms = 10f64.powf(detector::THRESHOLD_DB / 20.0) / 2f64.sqrt();
+            let snr = 20.0 * threshold_rms.log10() - 10.0 * in_band.log10();
             check(
-                &format!("signal to noise, {}, better than 75 dB", rev.name),
-                format!("{:.1} dB", -db),
-                -db > 75.0,
+                &format!("signal to noise at threshold, {}", rev.name),
+                format!("{snr:.1} dB"),
+                snr > 75.0,
             );
         }
 
@@ -496,6 +517,7 @@ fn main() {
                 output_db: 0.0,
                 attack: 0.5,
                 release: 0.5,
+                limiting: true,
                 buttons: b,
             };
             let mut ch = Channel::new(REV_D, FS, 4, 1);
@@ -510,7 +532,7 @@ fn main() {
             println!(
                 "  {:<18} {:>5.0} {:>6.2} dB {:>7.3} % {:>7.2}:1",
                 label.join("+"),
-                c.sidechain_gain().unwrap_or(0.0),
+                c.sidechain_gain(&REV_D.bank).unwrap_or(0.0),
                 ch.gain_reduction_db(),
                 thd_rev(REV_D, c, -18.0),
                 10.0 / (hi - lo)
@@ -526,6 +548,7 @@ fn main() {
             output_db: 0.0,
             attack: 0.5,
             release: 0.5,
+            limiting: true,
             buttons: [true; 4],
         };
         let twenty = |drive: f64| Controls {
@@ -610,6 +633,7 @@ fn main() {
                 output_db: output,
                 attack: dial_position(dial("attack").unwrap_or(4.0) as f32),
                 release: dial_position(dial("release").unwrap_or(4.0) as f32),
+                limiting: true,
                 buttons: [
                     dial("ratio4").unwrap_or(0.0) > 0.5,
                     dial("ratio8").unwrap_or(0.0) > 0.5,
@@ -652,6 +676,7 @@ fn main() {
             output_db: dial("output"),
             attack: dial_position(dial("attack") as f32),
             release: dial_position(dial("release") as f32),
+            limiting: true,
             buttons: [true; 4],
         };
         let four = Controls {

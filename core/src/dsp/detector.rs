@@ -149,6 +149,21 @@ impl Detector {
         if timing == self.timing {
             return;
         }
+        // Moving the dead zone moves where the envelope's charge starts to
+        // count, so the envelope moves with it and the reduction carries on
+        // from where it was. Left alone, going from all four buttons to one
+        // while the unit was working turned the 30 dB the envelope held
+        // against the dead zone into 30 dB of sudden gain reduction. When
+        // nothing is being reduced, only a shrinking dead zone moves it, so a
+        // resting envelope does not start out charged.
+        let change = timing.dead_zone - self.timing.dead_zone;
+        let shift = if self.reduction() > 0.0 {
+            change
+        } else {
+            change.min(0.0)
+        };
+        self.fast = (self.fast + shift).max(0.0);
+        self.slow = (self.slow + shift).max(0.0);
         self.timing = timing;
         self.recompute();
     }

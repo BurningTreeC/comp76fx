@@ -49,9 +49,11 @@ impl Strip {
     }
 
     /// One sample. `mix` is the share of the circuit in the output, from `0.0`
-    /// to `1.0`. With the power off the unit is out of circuit and what comes
-    /// out is the dry signal alone -- still held back, so switching it does
-    /// not move the track in time against the rest of the session.
+    /// to `1.0`. With the unit switched off at the meter switch it is out of
+    /// circuit and what comes out is the dry signal alone -- still held back,
+    /// so switching it does not move the track in time against the rest of
+    /// the session. A real unit switched off passes nothing at all, which in
+    /// a plugin would only be a way to lose the track.
     #[inline]
     pub fn process(&mut self, sample: f32, mix: f32, powered: bool) -> f32 {
         let dry = self.dry.process(sample as f64) as f32;
@@ -147,7 +149,7 @@ impl Comp76 {
             }
         }
 
-        let powered = self.params.power.value();
+        let powered = self.params.powered();
         if !powered && self.powered {
             self.strips.iter_mut().for_each(Strip::switch_off);
         }

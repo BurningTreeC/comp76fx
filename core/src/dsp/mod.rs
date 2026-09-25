@@ -76,31 +76,53 @@ const DIODE_KNEE_DB: f64 = 0.5;
 /// enough to leave the audio band alone, like the output coupling.
 pub const SIDECHAIN_COUPLING_HZ: f64 = 5.0;
 
-/// The signal half of the ratio switch bank, from ground up, in kilohms: R22,
-/// R21, R20, R19 and R78 of the Rev D schematic. The preamplifier's output
-/// is at the top; each button connects the junction above its own resistor
-/// -- 4:1 above R22, 8:1 above R21, 12:1 above R20, 20:1 above R19 -- to a
-/// common line into the gain reduction control amplifier.
+/// The ratio switch bank's two resistor ladders, as a revision's schematic
+/// draws them.
+///
+/// The signal ladder runs from ground up to the preamplifier's output; each
+/// button connects the junction above its own resistor -- 4:1 above the
+/// first, 8:1 above the second, 12:1 above the third, 20:1 above the fourth
+/// -- to a common line into the gain reduction control amplifier. The bias
+/// ladder's three resistors sit between the same buttons' second contacts,
+/// in the network that sets the gate's resting bias.
 ///
 /// So pressing several buttons does not put anything in parallel. It joins
 /// their junctions, which shorts out every resistor between the lowest and
 /// the highest one pressed: the buttons in between change nothing, which is
 /// Universal Audio's own observation that "only the 'outside' ratios are
-/// relevant", and all four in shorts three of the ladder's five resistors.
-const SIGNAL_LADDER_KOHM: [f64; 5] = [47.0, 56.0, 56.0, 68.0, 56.0];
+/// relevant", and all four in shorts three of each ladder's resistors.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SwitchBank {
+    /// The signal ladder from ground up, in kilohms.
+    pub signal_kohm: [f64; 5],
+    /// The bias ladder between the 4:1 and 8:1, 8:1 and 12:1, and 12:1 and
+    /// 20:1 contacts, in ohms.
+    pub bias_ohm: [f64; 3],
+}
 
-/// The bias half of the bank, in ohms: R61, R62 and R63, between the 4:1 and
-/// 8:1, 8:1 and 12:1, and 12:1 and 20:1 contacts. It hangs off the network
-/// that sets the gate's resting bias, down to the -10 V rail, and pressing
-/// several buttons shorts the part of it between the outermost two.
-const BIAS_LADDER_OHM: [f64; 3] = [470.0, 560.0, 1500.0];
+/// The low noise units' bank, from the Rev D schematic -- R22, R21, R20, R19
+/// and R78; R61, R62 and R63 -- and the same values on the Rev F's. The
+/// marked ratios and the manual's thresholds are this bank's.
+pub const LN_BANK: SwitchBank = SwitchBank {
+    signal_kohm: [47.0, 56.0, 56.0, 68.0, 56.0],
+    bias_ohm: [470.0, 560.0, 1500.0],
+};
+
+/// The Rev A's, from its schematic: the resistor above the 20:1 contact is
+/// 47k rather than 56k, which passes every button about 3 % more signal,
+/// and the bias ladder's middle resistor is 470 rather than 560.
+pub const REV_A_BANK: SwitchBank = SwitchBank {
+    signal_kohm: [47.0, 56.0, 56.0, 68.0, 47.0],
+    bias_ohm: [470.0, 470.0, 1500.0],
+};
 
 /// What shortening the bias ladder does to the gate's resting bias, from a
 /// circuit simulation of all-button mode posted to GroupDIY by ioplex: the
 /// ladder draws 1.62 mA with one button in and 2.98 mA with all four, and
 /// the control voltage's resting point moves from -2.0 V to -3.2 V. The rail
-/// is the manual's -10 V. [`rest_bias_v`] fits a source and resistance
-/// behind the ladder to both points, so partial combinations fall between.
+/// is the manual's -10 V. [`SwitchBank::rest_bias_v`] fits a source and
+/// resistance behind the ladder to both points, so partial combinations fall
+/// between.
 const REST_ONE_BUTTON_V: f64 = -2.0;
 const REST_ALL_BUTTONS_V: f64 = -3.2;
 const BIAS_RAIL_V: f64 = -10.0;
@@ -146,44 +168,66 @@ fn span(buttons: [bool; 4]) -> Option<(usize, usize)> {
     Some((low, high))
 }
 
-/// The share of the preamplifier's output the signal ladder passes to the
-/// sidechain with the buttons from `low` to `high` pressed.
-pub fn ladder_tap(low: usize, high: usize) -> f64 {
-    let below: f64 = SIGNAL_LADDER_KOHM[..=low].iter().sum();
-    let shorted: f64 = SIGNAL_LADDER_KOHM[low + 1..=high].iter().sum();
-    let total: f64 = SIGNAL_LADDER_KOHM.iter().sum();
-    below / (total - shorted)
-}
+impl SwitchBank {
+    /// The share of the preamplifier's output the signal ladder passes to the
+    /// sidechain with the buttons from `low` to `high` pressed.
+    pub fn tap(&self, low: usize, high: usize) -> f64 {
+        let ladder = &self.signal_kohm;
+        let below: f64 = ladder[..=low].iter().sum();
+        let shorted: f64 = ladder[low + 1..=high].iter().sum();
+        let total: f64 = ladder.iter().sum();
+        below / (total - shorted)
+    }
 
-/// A single button's figure, read at a share of signal `tap` between the
-/// buttons' own shares on the ladder.
-fn along_ladder(tap: f64, figure: impl Fn(usize) -> f64) -> f64 {
-    let taps: [f64; 4] = std::array::from_fn(|i| ladder_tap(i, i));
-    let upper = (1..taps.len())
-        .find(|&i| tap <= taps[i])
-        .unwrap_or(taps.len() - 1);
-    let lower = upper - 1;
-    let along = ((tap - taps[lower]) / (taps[upper] - taps[lower])).clamp(0.0, 1.0);
-    figure(lower) + (figure(upper) - figure(lower)) * along
-}
+    /// A single button's sidechain gain on this bank. The markings are the
+    /// low noise bank's; a bank that passes a button more signal gives it
+    /// proportionally more loop gain.
+    fn single_gain(&self, button: usize) -> f64 {
+        (RATIOS[button] - 1.0) * self.tap(button, button) / LN_BANK.tap(button, button)
+    }
 
-/// The gate's resting bias with the buttons from `low` to `high` pressed, in
-/// volts.
-pub fn rest_bias_v(low: usize, high: usize) -> f64 {
-    let one = (REST_ONE_BUTTON_V - BIAS_RAIL_V) / (LADDER_ONE_BUTTON_MA * 1e-3);
-    let all = (REST_ALL_BUTTONS_V - BIAS_RAIL_V) / (LADDER_ALL_BUTTONS_MA * 1e-3);
-    // The simulation's ladder loses a little more than the schematic's three
-    // resistors add up to; scale so all four lands on its figure exactly.
-    let schematic: f64 = BIAS_LADDER_OHM.iter().sum();
-    let shorted: f64 = BIAS_LADDER_OHM[low..high].iter().sum::<f64>() * (one - all) / schematic;
-    // A source `v` behind `r` into the ladder, fitted to both points.
-    let (a, b) = (
-        REST_ONE_BUTTON_V - BIAS_RAIL_V,
-        REST_ALL_BUTTONS_V - BIAS_RAIL_V,
-    );
-    let r = (one * all * (a - b)) / (b * one - a * all);
-    let v = a * (one + r) / one;
-    BIAS_RAIL_V + v * (one - shorted) / (one - shorted + r)
+    /// A single button's threshold offset on this bank: the manual's, lower
+    /// by however much more signal this bank passes that button.
+    fn single_offset(&self, button: usize) -> f64 {
+        THRESHOLD_OFFSETS_DB[button]
+            + 20.0 * (LN_BANK.tap(button, button) / self.tap(button, button)).log10()
+    }
+
+    /// A single button's figure, read at a share of signal `tap` between the
+    /// buttons' own shares on the ladder.
+    fn along(&self, tap: f64, figure: impl Fn(usize) -> f64) -> f64 {
+        let taps: [f64; 4] = std::array::from_fn(|i| self.tap(i, i));
+        let upper = (1..taps.len())
+            .find(|&i| tap <= taps[i])
+            .unwrap_or(taps.len() - 1);
+        let lower = upper - 1;
+        let along = ((tap - taps[lower]) / (taps[upper] - taps[lower])).clamp(0.0, 1.0);
+        figure(lower) + (figure(upper) - figure(lower)) * along
+    }
+
+    /// The gate's resting bias with the buttons from `low` to `high` pressed,
+    /// in volts.
+    pub fn rest_bias_v(&self, low: usize, high: usize) -> f64 {
+        let one = (REST_ONE_BUTTON_V - BIAS_RAIL_V) / (LADDER_ONE_BUTTON_MA * 1e-3);
+        let all = (REST_ALL_BUTTONS_V - BIAS_RAIL_V) / (LADDER_ALL_BUTTONS_MA * 1e-3);
+        // The simulation's ladder loses a little more than the schematic's
+        // three resistors add up to; scale so all four lands on its figure.
+        let schematic: f64 = self.bias_ohm.iter().sum();
+        let shorted: f64 = self.bias_ohm[low..high].iter().sum::<f64>() * (one - all) / schematic;
+        // A source `v` behind `r` into the ladder, fitted to both points.
+        let (a, b) = (
+            REST_ONE_BUTTON_V - BIAS_RAIL_V,
+            REST_ALL_BUTTONS_V - BIAS_RAIL_V,
+        );
+        let r = (one * all * (a - b)) / (b * one - a * all);
+        let v = a * (one + r) / one;
+        BIAS_RAIL_V + v * (one - shorted) / (one - shorted + r)
+    }
+
+    /// How far all four buttons drag the gate's rest down, in volts.
+    fn full_drop_v(&self) -> f64 {
+        self.rest_bias_v(3, 3) - self.rest_bias_v(0, 3)
+    }
 }
 
 /// What separates one revision from another. The three that ship are in
@@ -206,12 +250,13 @@ pub struct Revision {
     pub fet_drive: f64,
     /// Asymmetry of the FET's operating point.
     pub fet_bias: f64,
-    /// Broadband noise the unit contributes, in dB below full scale. The low
-    /// noise revisions are the quieter ones, which is what LN meant.
-    pub noise_floor_db: f64,
-    /// Ratio the sidechain actually reaches, as a fraction of the marked
-    /// value. The early units do not quite hit their marks.
-    pub ratio_accuracy: f64,
+    /// Signal to noise at the threshold of the 20:1, in dB, measured the
+    /// manual's way: noise from 30 Hz to 15.7 kHz through 6 dB/octave
+    /// slopes, against a tone at the threshold. The manual works its own
+    /// figure out as 80 dB.
+    pub signal_to_noise_db: f64,
+    /// The ratio switch bank, which sets the ratios and thresholds.
+    pub bank: SwitchBank,
 }
 
 impl Revision {
@@ -219,7 +264,7 @@ impl Revision {
     /// the circuit rather than the noise floor.
     pub const fn without_noise(self) -> Self {
         Self {
-            noise_floor_db: -400.0,
+            signal_to_noise_db: 400.0,
             ..self
         }
     }
@@ -227,15 +272,16 @@ impl Revision {
 
 /// The faceplate a revision was built with. The units were not restyled on
 /// every revision, so a finish covers a run of them: the Bluestripe badge
-/// belongs to the earliest, black to the low noise units that followed, and
-/// the brushed aluminium panel to the UREI era from Rev F on.
+/// belongs to the earliest, black to the low noise units that followed
+/// through Rev G, and the brushed aluminium panel to the Rev H. None of the
+/// modelled revisions is a Rev H; the silver panel is kept for when one is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Finish {
     /// Black panel with the painted band around the meter. Rev A and B.
     BlueStripe,
-    /// Black panel throughout. Rev C to E.
+    /// Black panel throughout. Rev C to G.
     BlackFace,
-    /// Brushed aluminium with black lettering. Rev F onward.
+    /// Brushed aluminium with black lettering. Rev H.
     SilverFace,
 }
 
@@ -244,11 +290,15 @@ pub enum Finish {
 pub struct Controls {
     /// Drive into the fixed operating point, in dB.
     pub input_db: f64,
-    /// Make-up after the gain element, in dB.
+    /// The output control, in dB: make-up after the gain element, ahead of
+    /// the line amplifier.
     pub output_db: f64,
     /// `0.0` slowest, `1.0` fastest, as the panel is marked.
     pub attack: f64,
     pub release: f64,
+    /// The switch on the attack control. Off -- the knob turned fully
+    /// anticlockwise -- disables the limiting and leaves the colour.
+    pub limiting: bool,
     /// Which ratio buttons are pressed. All four is all-button mode; none at
     /// all is 1:1, which passes the signal through the amplifier untouched by
     /// the gain element.
@@ -262,12 +312,20 @@ impl Default for Controls {
             output_db: 0.0,
             attack: 0.5,
             release: 0.5,
+            limiting: true,
             buttons: [true, false, false, false],
         }
     }
 }
 
 impl Controls {
+    /// Whether the gain element is in circuit: the limiting switched on and
+    /// a ratio selected. Otherwise the signal passes through the amplifiers
+    /// with their colour and no gain reduction.
+    pub fn compressing(&self) -> bool {
+        self.limiting && span(self.buttons).is_some()
+    }
+
     pub fn all_buttons(&self) -> bool {
         self.buttons.iter().all(|pressed| *pressed)
     }
@@ -277,8 +335,8 @@ impl Controls {
         self.buttons.iter().filter(|p| **p).count()
     }
 
-    /// Sidechain gain, which is the ratio less one. `None` when no button is
-    /// in and the gain element is out of circuit.
+    /// Sidechain gain on a switch bank, which is the ratio less one. `None`
+    /// when no button is in and the gain element is out of circuit.
     ///
     /// A combination shorts the signal ladder between its outermost buttons
     /// and passes the sidechain a share of the signal between theirs, so it
@@ -289,43 +347,41 @@ impl Controls {
     /// [`DEAD_ZONE_LOOP_GAIN`]) into the manual's "somewhere between 12:1 and
     /// 20:1". Reading a combination as its highest button's ratio instead
     /// measured all four at 23:1 to 28:1, outside that.
-    pub fn sidechain_gain(&self) -> Option<f64> {
-        let full_drop = rest_bias_v(3, 3) - rest_bias_v(0, 3);
-        span(self.buttons).map(|(low, high)| {
-            along_ladder(ladder_tap(low, high), |i| RATIOS[i] - 1.0)
-                * (1.0 + DEAD_ZONE_LOOP_GAIN * self.bias_drop_v() / full_drop)
-        })
+    pub fn sidechain_gain(&self, bank: &SwitchBank) -> Option<f64> {
+        let boost = 1.0 + DEAD_ZONE_LOOP_GAIN * self.bias_drop_v(bank) / bank.full_drop_v();
+        span(self.buttons)
+            .map(|(low, high)| bank.along(bank.tap(low, high), |i| bank.single_gain(i)) * boost)
     }
 
     /// The ratio the loop settles at before the knee is taken into account.
-    pub fn ratio(&self) -> Option<f64> {
-        self.sidechain_gain().map(|k| k + 1.0)
+    pub fn ratio(&self, bank: &SwitchBank) -> Option<f64> {
+        self.sidechain_gain(bank).map(|k| k + 1.0)
     }
 
-    /// Where the pressed buttons put the threshold, relative to the 20:1's,
-    /// in dB, read off the single buttons' at the share of signal the ladder
-    /// passes, as [`Self::sidechain_gain`] is. The gate's shifted bias raises
-    /// it further, through [`Self::dead_zone_db`].
-    pub fn threshold_offset_db(&self) -> f64 {
+    /// Where the pressed buttons put the threshold, relative to the 20:1's
+    /// on the low noise bank, in dB, read off the single buttons' at the
+    /// share of signal the ladder passes, as [`Self::sidechain_gain`] is. The
+    /// gate's shifted bias raises it further, through [`Self::dead_zone_db`].
+    pub fn threshold_offset_db(&self, bank: &SwitchBank) -> f64 {
         match span(self.buttons) {
-            Some((low, high)) => along_ladder(ladder_tap(low, high), |i| THRESHOLD_OFFSETS_DB[i]),
+            Some((low, high)) => bank.along(bank.tap(low, high), |i| bank.single_offset(i)),
             None => 0.0,
         }
     }
 
     /// How far below its calibrated rest the gate sits, in volts. Zero with a
     /// single button in; 1.2 V with all four.
-    pub fn bias_drop_v(&self) -> f64 {
+    pub fn bias_drop_v(&self, bank: &SwitchBank) -> f64 {
         match span(self.buttons) {
-            Some((low, high)) => rest_bias_v(high, high) - rest_bias_v(low, high),
+            Some((low, high)) => bank.rest_bias_v(high, high) - bank.rest_bias_v(low, high),
             None => 0.0,
         }
     }
 
     /// The control the sidechain has to supply before the gain element starts
     /// to open, in dB. See [`CONTROL_DB_PER_VOLT`].
-    pub fn dead_zone_db(&self) -> f64 {
-        self.bias_drop_v() * CONTROL_DB_PER_VOLT
+    pub fn dead_zone_db(&self, bank: &SwitchBank) -> f64 {
+        self.bias_drop_v(bank) * CONTROL_DB_PER_VOLT
     }
 }
 
@@ -426,11 +482,7 @@ impl Channel {
         self.coupling.set_cutoff(SIDECHAIN_COUPLING_HZ, internal);
         self.pad
             .set_delay((LATENCY - self.oversampler.latency()) as usize);
-        // The noise is white at the internal rate, and the way back down to
-        // the host rate keeps only the audio band, which is `1 / factor` of
-        // it. Scaled by the root of the factor, the noise that is left is the
-        // same at every setting, so the quality switch cannot move the floor.
-        self.noise_gain = db_to_gain(self.revision.noise_floor_db) * (factor as f64).sqrt();
+        self.noise_gain = noise_amplitude(self.revision.signal_to_noise_db, internal);
     }
 
     /// Always [`LATENCY`], whatever the oversampling.
@@ -453,24 +505,23 @@ impl Channel {
         // sidechain with it. Letting go of what it held means that when a
         // button goes back in, the reduction it starts from is the reduction
         // the gain element is actually applying, which is none.
-        if self.controls.ratio().is_none() {
+        if !self.controls.compressing() {
             self.detector.reset();
             self.reduction_db = 0.0;
         }
 
-        let marked = self.controls.sidechain_gain().unwrap_or(0.0);
-        let ratio = (marked * self.revision.ratio_accuracy).max(0.0);
-        let full_drop = rest_bias_v(3, 3) - rest_bias_v(0, 3);
-        let drop = self.controls.bias_drop_v();
+        let bank = self.revision.bank;
+        let gain = self.controls.sidechain_gain(&bank).unwrap_or(0.0);
+        let drop = self.controls.bias_drop_v(&bank);
 
         // The gate pulled off its null is what makes a combination dirty.
         self.fet
-            .set_bias_shift(1.0 + (ALL_BUTTON_FET_SHIFT - 1.0) * drop / full_drop);
+            .set_bias_shift(1.0 + (ALL_BUTTON_FET_SHIFT - 1.0) * drop / bank.full_drop_v());
 
-        let offset = self.controls.threshold_offset_db();
+        let offset = self.controls.threshold_offset_db(&bank);
 
         self.detector.set_timing(Timing {
-            k: ratio,
+            k: gain,
             attack: detector::knob_to_time(
                 self.controls.attack,
                 detector::ATTACK_FASTEST,
@@ -482,8 +533,8 @@ impl Channel {
                 detector::RELEASE_SLOWEST,
             ),
             threshold: detector::THRESHOLD_DB + offset,
-            knee: diode_knee_db(marked, offset),
-            dead_zone: self.controls.dead_zone_db(),
+            knee: diode_knee_db(gain, offset),
+            dead_zone: self.controls.dead_zone_db(&bank),
         });
     }
 
@@ -506,8 +557,9 @@ impl Channel {
 
     #[inline]
     pub fn process(&mut self, sample: f32) -> f32 {
-        let compressing = self.controls.ratio().is_some();
+        let compressing = self.controls.compressing();
         let noise_gain = self.noise_gain;
+        let output_gain = self.output_gain;
 
         let Self {
             detector,
@@ -521,9 +573,17 @@ impl Channel {
             ..
         } = self;
 
+        // The output control sits between the preamplifier and the line
+        // amplifier, as on the hardware, so turning it up drives the output
+        // stage harder and colours more. It used to be a plain gain after
+        // everything, which left the output stage's colour the same wherever
+        // the knob was set.
         let out = oversampler.process(sample as f64 * self.input_gain, &mut |x| {
+            // The noise is the preamplifier's, which is where the manual's
+            // measurement puts it: turning the input down barely changes it,
+            // and it comes through the output control with the signal.
             if !compressing {
-                return amp.process(x) + white(noise) * noise_gain;
+                return amp.process((x + white(noise) * noise_gain) * output_gain);
             }
             // The gain element runs on what the detector asked for, and the
             // detector is fed what came out, which is how the loop is closed.
@@ -534,10 +594,10 @@ impl Channel {
             let reduced = fet.process(x, -*reduction_db);
             *reduction_db = detector.process_in_loop(coupling.highpass(reduced));
             *meter_db = meter_db.max(detector.control_db());
-            amp.process(reduced) + white(noise) * noise_gain
+            amp.process((reduced + white(noise) * noise_gain) * output_gain)
         });
 
-        (self.pad.process(out) * self.output_gain) as f32
+        self.pad.process(out) as f32
     }
 
     pub fn reset(&mut self) {
@@ -549,6 +609,31 @@ impl Channel {
         self.reduction_db = 0.0;
         self.meter_db = f64::NEG_INFINITY;
     }
+}
+
+/// The band the manual measures noise over, 30 Hz to 15.7 kHz through
+/// 6 dB/octave slopes, as the width a flat band would need to pass the same
+/// white noise: a first order slope passes pi/2 times its corner.
+const NOISE_BANDWIDTH_HZ: f64 = std::f64::consts::FRAC_PI_2 * (15_700.0 - 30.0);
+
+/// The peak of the uniform noise added at a rate, for a signal to noise
+/// figure measured the manual's way.
+///
+/// The figure fixes the noise's density -- how much falls in each hertz --
+/// which is what an analog unit has. White noise spreads its power across
+/// the whole band up to half the rate it is made at, so the same density
+/// needs more of it at a higher rate. Scaling it by the rate, which is also
+/// the rate after oversampling, keeps the density and so the noise the same
+/// whatever the host's rate and the quality setting. A fixed level per
+/// sample, which this used to be, made the in-band noise fall 3 dB for every
+/// doubling of either.
+fn noise_amplitude(signal_to_noise_db: f64, rate: f64) -> f64 {
+    // A tone at the 20:1's threshold, as an RMS level.
+    let threshold_rms = db_to_gain(detector::THRESHOLD_DB) / std::f64::consts::SQRT_2;
+    let in_band = threshold_rms * db_to_gain(-signal_to_noise_db);
+    let rms = in_band * (rate / 2.0 / NOISE_BANDWIDTH_HZ).sqrt();
+    // Uniform noise between -a and a has an RMS of a / sqrt(3).
+    rms * 3f64.sqrt()
 }
 
 #[inline]
@@ -572,38 +657,67 @@ mod switch_bank {
     /// The single buttons' taps from the Rev D values, and all four's.
     #[test]
     fn the_signal_ladder_divides_as_drawn() {
-        let taps: Vec<f64> = (0..4).map(|i| ladder_tap(i, i)).collect();
+        let taps: Vec<f64> = (0..4).map(|i| LN_BANK.tap(i, i)).collect();
         for (tap, wanted) in taps.iter().zip([0.166, 0.364, 0.562, 0.802]) {
             assert!((tap - wanted).abs() < 0.001, "{tap:.3} against {wanted}");
         }
-        assert!((ladder_tap(0, 3) - 0.456).abs() < 0.001);
+        assert!((LN_BANK.tap(0, 3) - 0.456).abs() < 0.001);
     }
 
     /// The fit lands on both of the simulation's points.
     #[test]
     fn the_gate_rests_where_the_simulation_puts_it() {
-        for i in 0..4 {
-            assert!((rest_bias_v(i, i) - REST_ONE_BUTTON_V).abs() < 1e-9);
+        for bank in [LN_BANK, REV_A_BANK] {
+            for i in 0..4 {
+                assert!((bank.rest_bias_v(i, i) - REST_ONE_BUTTON_V).abs() < 1e-9);
+            }
+            assert!((bank.rest_bias_v(0, 3) - REST_ALL_BUTTONS_V).abs() < 1e-9);
+            // A partial combination shorts less of the ladder, moving it less.
+            let partial = bank.rest_bias_v(1, 3);
+            assert!(partial < REST_ONE_BUTTON_V && partial > REST_ALL_BUTTONS_V);
         }
-        assert!((rest_bias_v(0, 3) - REST_ALL_BUTTONS_V).abs() < 1e-9);
-        // A partial combination shorts less of the ladder and moves it less.
-        let partial = rest_bias_v(1, 3);
-        assert!(partial < REST_ONE_BUTTON_V && partial > REST_ALL_BUTTONS_V);
     }
 
-    /// A single button is exactly its marking, and the manual's thresholds.
+    fn single(button: usize) -> Controls {
+        let mut buttons = [false; 4];
+        buttons[button] = true;
+        Controls {
+            buttons,
+            ..Controls::default()
+        }
+    }
+
+    /// On the low noise bank a single button is exactly its marking, at the
+    /// manual's threshold.
     #[test]
     fn a_single_button_is_its_marking() {
         for (i, ratio) in RATIOS.iter().enumerate() {
-            let mut buttons = [false; 4];
-            buttons[i] = true;
-            let controls = Controls {
-                buttons,
-                ..Controls::default()
-            };
-            assert_eq!(controls.ratio(), Some(*ratio));
-            assert!((controls.threshold_offset_db() - THRESHOLD_OFFSETS_DB[i]).abs() < 1e-12);
-            assert_eq!(controls.dead_zone_db(), 0.0);
+            let controls = single(i);
+            let measured = controls.ratio(&LN_BANK).unwrap();
+            assert!(
+                (measured - ratio).abs() < 1e-9,
+                "{measured} against {ratio}"
+            );
+            assert!(
+                (controls.threshold_offset_db(&LN_BANK) - THRESHOLD_OFFSETS_DB[i]).abs() < 1e-9
+            );
+            assert_eq!(controls.dead_zone_db(&LN_BANK), 0.0);
+        }
+    }
+
+    /// The Rev A's ladder has 47k above the 20:1 contact rather than 56k, so
+    /// every button gets about 3 % more signal: its ratios sit a little
+    /// steeper and its thresholds a little lower than the markings.
+    #[test]
+    fn the_rev_a_bank_passes_a_little_more_signal() {
+        for i in 0..4 {
+            let controls = single(i);
+            let a = controls.sidechain_gain(&REV_A_BANK).unwrap();
+            let d = controls.sidechain_gain(&LN_BANK).unwrap();
+            assert!((1.02..1.05).contains(&(a / d)), "button {i}: {:.3}", a / d);
+            let lower =
+                controls.threshold_offset_db(&LN_BANK) - controls.threshold_offset_db(&REV_A_BANK);
+            assert!((0.1..0.5).contains(&lower), "button {i}: {lower:.2} dB");
         }
     }
 }

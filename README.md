@@ -6,9 +6,15 @@ builds as CLAP and VST3.
 
 | Plugin | Circuit | Character |
 | --- | --- | --- |
-| **Comp76Fx Rev A** | no low noise circuit, Class A output, painted meter surround | the most aggressive and the noisiest, and its ratios undershoot their markings |
-| **Comp76Fx Rev D** | low noise circuitry, Class A output | the one most people mean; the reference reissue is patterned on the D and E |
-| **Comp76Fx Rev F** | low noise, push-pull Class AB output | cleaner and tighter, with the distortion turning symmetrical |
+| **Comp76Fx Rev A** | no low noise circuit, FET preamplifier and line amplifier, Class A output, painted meter surround | the dirtiest and the noisiest, by 3.4 dB; its switch bank makes its ratios about 3 % steeper than marked |
+| **Comp76Fx Rev D** | low noise circuitry, Class A output, black panel | the one most people mean; the reference reissue is patterned on the D and E |
+| **Comp76Fx Rev F** | low noise, push-pull Class AB output, black panel | the cleanest, with the distortion turning symmetrical |
+
+Each revision's switch bank is read off its own schematic in the UREI manual,
+and the noise is the manual's 80 dB signal to noise at threshold for the low
+noise units, with the Rev A 3.4 dB worse as a side by side measurement found.
+How hard each one's FET and output stage are driven is documented only in
+direction, so those are voicing.
 
 They are not affiliated with, endorsed by, or connected to Universal Audio or
 any other manufacturer. Model numbers are used only to say which circuit is
@@ -102,7 +108,7 @@ and the tests in `core/tests/compression.rs`:
 | release | 50.0 ms to 1100 ms against a marked 50 ms to 1.1 s |
 | distortion, idle at −18 dBFS | Rev A 0.48 %, Rev D 0.33 %, Rev F 0.05 % |
 | frequency response | within 0.53 dB across 20 Hz to 20 kHz |
-| signal to noise | Rev A 91 dB, Rev D 101 dB, Rev F 103 dB, at every oversampling setting |
+| signal to noise at threshold, the manual's way | Rev A 76.5 dB, Rev D 80 dB, Rev F 80 dB, at every sample rate and oversampling setting |
 | latency | 74 samples at every oversampling setting, dry blend included |
 
 `core/tests/calibration.rs` holds the published figures to those tolerances,
@@ -122,24 +128,30 @@ two nearly cancel.
 
 The panel is the hardware's. **Input** drives the signal against a fixed
 operating point, which is how the unit is threshold-less; **output** is
-make-up. Attack and release are engraved 1 to 7, slowest to fastest, which is
-backwards from most compressors and is how the originals were engraved; 1 is
-800 µs and 1.1 s, 7 is 20 µs and 50 ms.
+make-up, and as on the hardware it sits ahead of the line amplifier, so
+turning it up drives the output stage harder and colours more. Attack and
+release are engraved 1 to 7, slowest to fastest, which is backwards from most
+compressors and is how the originals were engraved; 1 is 800 µs and 1.1 s, 7
+is 20 µs and 50 ms. Turned fully anticlockwise past the 1, the attack control
+switches the limiting **off**: the signal still passes through the amplifiers
+for their colour, with no gain reduction.
 
 The four **ratio** switches are mechanically interlocked, so clicking one
 releases the others. **Hold shift or ctrl to latch**, which is how you get all
 four in at once without having to be quick with your fingers.
 
-The **meter** switch selects gain reduction, output level referenced to +4 or
-+8, or off. The output positions read the average level, referred to a sine,
-so a tone peaking at −18 dBFS sits on 0 VU at +4.
+The **meter** switch selects gain reduction or output level referenced to +4
+or +8, and, as on the hardware, its **OFF** button is the power switch: the
+unit is out of circuit and the signal passes straight through (a real one
+switched off passes nothing). The output positions read the average level,
+referred to a sine, so a tone peaking at −18 dBFS sits on 0 VU at +4.
 
 The strip above the panel is not on the hardware. It carries the preset drop
 down, a save button and the settings button, which holds the window scale
 (50 % to 200 %), the oversampling quality and the dry blend. The plugin reports
 the same latency at every oversampling setting, and the dry blend and the
-power switch are delayed to match, so neither moves the track against the rest
-of the session.
+switched-off signal are delayed to match, so neither moves the track against
+the rest of the session.
 
 Saved presets are one JSON file each, under a folder of the revision's own so
 the three do not share: `~/.config/comp76fx-rev-a/presets` on Linux and macOS

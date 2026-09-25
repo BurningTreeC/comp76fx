@@ -17,15 +17,23 @@ use crate::dsp::Revision;
 const PRODUCT: &str = "Comp76Fx";
 
 /// Parameters a preset leaves alone. Oversampling is a choice about the
-/// machine rather than the sound, and the power switch is not a setting.
-const EXCLUDED: &[&str] = &["os", "power"];
+/// machine rather than the sound, and the meter switch is the power switch:
+/// a preset saved with the meter OFF would switch the unit off on loading.
+/// "power" was the separate switch before the meter took over; presets saved
+/// then still carry it, and it is ignored.
+const EXCLUDED: &[&str] = &["os", "meter", "power"];
+
+/// Whether a preset leaves this parameter alone.
+pub fn is_excluded(id: &str) -> bool {
+    EXCLUDED.contains(&id)
+}
 
 /// Built-in presets, written in the values the panel shows so they can be read
 /// off the dial. They are converted to normalised values against the live
 /// parameters, so changing a control's range cannot silently move them.
 ///
-/// Ratio buttons are 1.0 for in and 0.0 for out; all four in is all-button
-/// mode. Attack and release are marked 1 to 7, slowest to fastest. The
+/// Ratio buttons and the limiting switch are 1.0 for in and 0.0 for out;
+/// all four buttons in is all-button mode. Attack and release are marked 1 to 7, slowest to fastest. The
 /// output is set so a tone at -18 dBFS comes back at the level it went in,
 /// except where the preset is a blend.
 const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
@@ -42,6 +50,7 @@ const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
             ("ratio12", 0.0),
             ("ratio20", 0.0),
             ("mix", 100.0),
+            ("limiting", 1.0),
         ],
     ),
     (
@@ -64,6 +73,7 @@ const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
             ("ratio12", 1.0),
             ("ratio20", 1.0),
             ("mix", 100.0),
+            ("limiting", 1.0),
         ],
     ),
     (
@@ -79,6 +89,7 @@ const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
             ("ratio12", 0.0),
             ("ratio20", 0.0),
             ("mix", 100.0),
+            ("limiting", 1.0),
         ],
     ),
     (
@@ -94,6 +105,7 @@ const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
             ("ratio12", 0.0),
             ("ratio20", 1.0),
             ("mix", 45.0),
+            ("limiting", 1.0),
         ],
     ),
 ];
@@ -275,7 +287,7 @@ pub fn capture(params: &impl Params, name: &str) -> Preset {
     let values = params
         .param_map()
         .into_iter()
-        .filter(|(id, _, _)| !EXCLUDED.contains(&id.as_str()))
+        .filter(|(id, _, _)| !is_excluded(id))
         .map(|(id, ptr, _)| {
             // SAFETY: as above, the pointers belong to the params we were given.
             let value = unsafe { ptr.unmodulated_normalized_value() };
@@ -383,7 +395,7 @@ pub fn matches(params: &impl Params, values: &BTreeMap<String, f32>) -> bool {
         return true;
     }
     params.param_map().into_iter().all(|(id, ptr, _)| {
-        let Some(&saved) = values.get(&id) else {
+        let Some(&saved) = values.get(&id).filter(|_| !is_excluded(&id)) else {
             return true;
         };
         // SAFETY: the pointer comes from the params we were handed.
@@ -576,6 +588,26 @@ mod tests {
         let left = load_from(&scratch.0);
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].name, "A_B");
+    }
+
+    /// The meter switch is the power switch, so a preset never carries it --
+    /// neither does the "power" a preset saved before then may hold -- and
+    /// neither counts when deciding whether the panel still matches.
+    #[test]
+    fn a_preset_never_switches_the_unit_off() {
+        let params = crate::params::Comp76Params::new(crate::editor::default_state());
+        let captured = capture(&params, "anything");
+        assert!(!captured.values.contains_key("meter"));
+        assert!(!captured.values.contains_key("power"));
+        assert!(captured.values.contains_key("limiting"));
+
+        let mut stale = captured.values.clone();
+        stale.insert("meter".to_string(), 1.0);
+        stale.insert("power".to_string(), 0.0);
+        assert!(
+            matches(&params, &stale),
+            "the meter and power made it look modified"
+        );
     }
 
     #[test]

@@ -355,6 +355,7 @@ fn the_all_buttons_in_preset_really_is() {
         output_db: dial("output") as f64,
         attack: dial_position(dial("attack")),
         release: dial_position(dial("release")),
+        limiting: true,
         buttons: [true; 4],
     };
     assert!(
@@ -460,6 +461,7 @@ fn the_built_in_presets_come_back_at_unity() {
             output_db: dial("output") as f64,
             attack: dial_position(dial("attack")),
             release: dial_position(dial("release")),
+            limiting: true,
             buttons: [
                 dial("ratio4") > 0.5,
                 dial("ratio8") > 0.5,
@@ -474,4 +476,81 @@ fn the_built_in_presets_come_back_at_unity() {
             "{name} comes back {gain:+.2} dB off unity"
         );
     }
+}
+
+/// Turned fully anticlockwise, the attack control switches the limiting off:
+/// "signal continues to pass through the 1176LN circuitry. This is commonly
+/// used to add the 'color' of the 1176LN without any actual gain reduction."
+/// So with a ratio selected and the unit driven hard, nothing is reduced and
+/// the level tracks the input.
+#[test]
+fn the_attack_off_position_passes_colour_only() {
+    let off = Controls {
+        buttons: buttons(3),
+        limiting: false,
+        ..Controls::default()
+    };
+    let quiet = steady_output_db(off, -50.0);
+    let loud = steady_output_db(off, -30.0);
+    assert!(
+        (loud - quiet - 20.0).abs() < 0.5,
+        "with the limiting off the level moved {:.2} dB for 20 dB in",
+        loud - quiet
+    );
+    let mut channel = Channel::new(REV_D, FS, 4, 1);
+    channel.set_controls(Controls {
+        input_db: 20.0,
+        ..off
+    });
+    for n in 0..(FS as usize / 2) {
+        let w = std::f64::consts::TAU * 1000.0 / FS;
+        channel.process((0.3 * (w * n as f64).sin()) as f32);
+    }
+    assert_eq!(channel.gain_reduction_db(), 0.0);
+}
+
+/// Harmonic distortion of a 1 kHz tone at the output, in percent.
+fn thd_percent(controls: Controls, input_db: f64) -> f64 {
+    let mut channel = Channel::new(REV_D, FS, 4, 1);
+    channel.set_controls(controls);
+    let amplitude = 10.0_f64.powf(input_db / 20.0);
+    let w = std::f64::consts::TAU * 1000.0 / FS;
+    for n in 0..FS as usize {
+        channel.process((amplitude * (w * n as f64).sin()) as f32);
+    }
+    let window = FS as usize;
+    let samples: Vec<f64> = (0..window)
+        .map(|n| channel.process((amplitude * (w * n as f64).sin()) as f32) as f64)
+        .collect();
+    let bin = |harmonic: f64| {
+        let (mut re, mut im) = (0.0, 0.0);
+        for (n, y) in samples.iter().enumerate() {
+            let phase = w * harmonic * n as f64;
+            re += y * phase.sin();
+            im += y * phase.cos();
+        }
+        (re * re + im * im).sqrt()
+    };
+    let harmonics = (2..=6).map(|h| bin(h as f64).powi(2)).sum::<f64>().sqrt();
+    100.0 * harmonics / bin(1.0)
+}
+
+/// The output control sits between the preamplifier and the line amplifier,
+/// so turning it up drives the output stage harder: the same compressed
+/// signal comes out more coloured with the make-up raised. When the control
+/// was a plain gain after everything, the colour did not move with it.
+#[test]
+fn the_output_control_drives_the_line_amplifier() {
+    let controls = |output_db| Controls {
+        buttons: buttons(3),
+        output_db,
+        ..Controls::default()
+    };
+    let low = thd_percent(controls(0.0), -6.0);
+    let high = thd_percent(controls(18.0), -6.0);
+    println!("20:1, tone at -6 dBFS: output 0 dB {low:.3} %, output +18 dB {high:.3} %");
+    assert!(
+        high > low * 1.5,
+        "raising the output from 0 to +18 dB took the distortion from {low:.3} % to {high:.3} %"
+    );
 }

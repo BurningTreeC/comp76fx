@@ -254,6 +254,7 @@ fn the_response_holds_its_window_at_every_rate() {
         output_db: 0.0,
         attack: 0.5,
         release: 0.5,
+        limiting: true,
         buttons: [false; 4],
     };
 
@@ -290,6 +291,129 @@ fn the_response_holds_its_window_at_every_rate() {
                     "{hz} Hz at {fs} Hz, oversampling {os}x: {d:+.2} dB, outside the published +/-1 dB"
                 );
             }
+        }
+    }
+}
+
+/// Signal to noise at the 20:1's threshold, measured the manual's way: the
+/// noise's density over 30 Hz to 15.7 kHz through 6 dB/octave slopes,
+/// against a tone at the threshold.
+fn manual_signal_to_noise_db(
+    revision: comp76fx_core::dsp::Revision,
+    fs: f64,
+    factor: usize,
+) -> f64 {
+    use comp76fx_core::dsp::{Channel, Controls};
+    let mut channel = Channel::new(revision, fs, factor, 1);
+    channel.set_controls(Controls::default());
+    let n = fs as usize / 2;
+    for _ in 0..n {
+        channel.process(0.0);
+    }
+    let y: Vec<f64> = (0..n).map(|_| channel.process(0.0) as f64).collect();
+    // The density where everything in the chain is flat: the mean power of
+    // the spectrum from 1 to 10 kHz. Reading it off the whole band instead
+    // counts the output transformer's roll-off above the audio band, which a
+    // host running at 96 kHz lets into the measurement.
+    let bins = 1000;
+    let power: f64 = (0..bins)
+        .map(|i| {
+            let hz = 1000.0 + 9000.0 * i as f64 / bins as f64;
+            let w = std::f64::consts::TAU * hz / fs;
+            let (mut re, mut im) = (0.0, 0.0);
+            for (k, v) in y.iter().enumerate() {
+                re += v * (w * k as f64).cos();
+                im += v * (w * k as f64).sin();
+            }
+            re * re + im * im
+        })
+        .sum::<f64>()
+        / bins as f64;
+    let density = power / n as f64 / (fs / 2.0);
+    let bandwidth = std::f64::consts::FRAC_PI_2 * (15_700.0 - 30.0);
+    let threshold_rms = 10f64.powf(detector::THRESHOLD_DB / 20.0) / 2f64.sqrt();
+    20.0 * threshold_rms.log10() - 10.0 * (density * bandwidth).log10()
+}
+
+/// The manual puts the low noise units at 80 dB signal to noise at the
+/// 20:1's threshold, and a side by side measurement found a Rev A 3.4 dB
+/// noisier than a Rev D. The noise is the circuit's, so its density must not
+/// depend on the rate the host runs at or the quality setting either; it
+/// used to be a fixed level per sample, which put it 3 dB lower for every
+/// doubling of the rate.
+#[test]
+fn the_noise_meets_the_manuals_signal_to_noise() {
+    use comp76fx_core::dsp::{REV_A, REV_D, REV_F};
+    for (fs, factor) in [(44_100.0, 1), (48_000.0, 4), (96_000.0, 1), (96_000.0, 4)] {
+        let d = manual_signal_to_noise_db(REV_D, fs, factor);
+        let a = manual_signal_to_noise_db(REV_A, fs, factor);
+        let f = manual_signal_to_noise_db(REV_F, fs, factor);
+        println!("{fs} Hz {factor}x: Rev A {a:.1} dB, Rev D {d:.1} dB, Rev F {f:.1} dB");
+        assert!(
+            (d - 80.0).abs() < 0.6,
+            "Rev D at {fs} Hz {factor}x: {d:.2} dB"
+        );
+        assert!(
+            ((d - a) - 3.4).abs() < 0.3,
+            "Rev A is {:.2} dB noisier",
+            d - a
+        );
+        assert!(
+            (d - f).abs() < 0.3,
+            "Rev F differs from Rev D by {:.2} dB",
+            d - f
+        );
+    }
+}
+
+/// Quiet material has to come through every revision at its own level. The
+/// Class AB stage's crossover used to be a dead band that scaled anything
+/// under -56 dBFS down in proportion to its size: a tone at -60 dBFS lost
+/// 5.5 dB and came out with 20 % distortion, in the revision documented as
+/// the cleanest.
+#[test]
+fn quiet_signals_pass_every_revision_intact() {
+    use comp76fx_core::dsp::{Channel, Controls, REV_A, REV_D, REV_F};
+    let fs = 48_000.0;
+    for revision in [REV_A, REV_D, REV_F] {
+        for level in [-40.0, -50.0, -60.0, -70.0, -80.0] {
+            let mut channel = Channel::new(revision.without_noise(), fs, 4, 1);
+            channel.set_controls(Controls {
+                buttons: [false; 4],
+                ..Controls::default()
+            });
+            let amplitude = 10f64.powf(level / 20.0);
+            let w = std::f64::consts::TAU * 1000.0 / fs;
+            for n in 0..(fs as usize / 2) {
+                channel.process((amplitude * (w * n as f64).sin()) as f32);
+            }
+            let window = fs as usize;
+            let y: Vec<f64> = (0..window)
+                .map(|n| channel.process((amplitude * (w * n as f64).sin()) as f32) as f64)
+                .collect();
+            let bin = |h: f64| {
+                let (mut re, mut im) = (0.0, 0.0);
+                for (n, v) in y.iter().enumerate() {
+                    let phase = w * h * n as f64;
+                    re += v * phase.sin();
+                    im += v * phase.cos();
+                }
+                2.0 * (re * re + im * im).sqrt() / window as f64
+            };
+            let fundamental = bin(1.0);
+            let gain = 20.0 * (fundamental / amplitude).log10();
+            let thd = (2..=9).map(|h| bin(h as f64).powi(2)).sum::<f64>().sqrt() / fundamental;
+            assert!(
+                gain.abs() < 0.2,
+                "{} at {level} dBFS: gain {gain:+.2} dB",
+                revision.name
+            );
+            assert!(
+                thd < 0.005,
+                "{} at {level} dBFS: {:.2} % distortion",
+                revision.name,
+                thd * 100.0
+            );
         }
     }
 }

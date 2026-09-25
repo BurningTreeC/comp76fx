@@ -179,7 +179,13 @@ impl UiState {
     /// so the change is automatable and undoable like any other edit.
     fn apply(&self, cx: &mut EventContext, preset: &Preset) {
         for (id, ptr, _) in self.params.param_map() {
-            let Some(&value) = preset.values.get(&id) else {
+            // A preset saved before the meter switch became the power switch
+            // still carries it; loading one must not switch the unit off.
+            let Some(&value) = preset
+                .values
+                .get(&id)
+                .filter(|_| !presets::is_excluded(&id))
+            else {
                 continue;
             };
             cx.emit(RawParamEvent::BeginSetParameter(ptr));

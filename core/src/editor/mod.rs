@@ -154,13 +154,16 @@ fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, me
 
     Knob::new(cx, Panel::params, |p| &p.input, R_LARGE).place(INPUT_X, ROW, R_LARGE);
     Knob::new(cx, Panel::params, |p| &p.output, R_LARGE).place(OUTPUT_X, ROW, R_LARGE);
-    Knob::new(cx, Panel::params, |p| &p.attack, R_SMALL).place(ATTACK_X, ROW, R_SMALL);
+    // The attack control carries the limiting switch at its anticlockwise end.
+    Knob::with_off_switch(cx, Panel::params, |p| &p.attack, |p| &p.limiting, R_SMALL)
+        .place(ATTACK_X, ROW, R_SMALL);
     Knob::new(cx, Panel::params, |p| &p.release, R_SMALL).place(RELEASE_X, ROW, R_SMALL);
 
     // The attack and release dials are marked slowest to fastest, which is the
-    // opposite way round from most compressors.
-    for x in [ATTACK_X, RELEASE_X] {
-        small(cx, ink, "SLOW", x - 40.0, ROW + 44.0, 7.5);
+    // opposite way round from most compressors. The attack dial's slow end is
+    // the OFF switch, which disables the limiting.
+    for (x, slow) in [(ATTACK_X, "OFF"), (RELEASE_X, "SLOW")] {
+        small(cx, ink, slow, x - 40.0, ROW + 44.0, 7.5);
         small(cx, ink, "FAST", x + 40.0, ROW + 44.0, 7.5);
     }
 

@@ -6,8 +6,15 @@ use std::sync::{Arc, Mutex};
 
 use crate::dsp::Controls;
 
-/// What the meter is switched to. The hardware powers up with the meter
-/// switch, so OFF is a real position rather than a hidden one.
+/// What the meter switch is set to, which is also the power switch.
+///
+/// On the hardware the three meter positions switch the unit on, and the
+/// fourth, OFF, "switches the AC power OFF" (the manual; Universal Audio's:
+/// "depressing the OFF position has the effect of powering off the
+/// 1176LN"). There is no separate power control on the panel, and the plugin
+/// used to keep one anyway, hidden from the panel but open to host
+/// automation, so the unit could be switched off with nothing on the panel
+/// saying so.
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MeterMode {
     #[id = "gr"]
@@ -81,8 +88,11 @@ pub struct Comp76Params {
 
     #[id = "meter"]
     pub meter: EnumParam<MeterMode>,
-    #[id = "power"]
-    pub power: BoolParam,
+    /// The switch coupled to the attack control: turned fully anticlockwise,
+    /// past the 1, the limiting is off and the signal passes through the
+    /// amplifiers for their colour alone.
+    #[id = "limiting"]
+    pub limiting: BoolParam,
     #[id = "mix"]
     pub mix: FloatParam,
     #[id = "os"]
@@ -152,7 +162,7 @@ impl Comp76Params {
             ratio_20: switch("Ratio 20:1", false),
 
             meter: EnumParam::new("Meter", MeterMode::GainReduction),
-            power: BoolParam::new("Power", true)
+            limiting: BoolParam::new("Limiting", true)
                 .with_value_to_string(Arc::new(|v| if v { "On" } else { "Off" }.to_string()))
                 .with_string_to_value(Arc::new(|s| {
                     Some(!matches!(
@@ -175,6 +185,11 @@ impl Comp76Params {
         }
     }
 
+    /// Whether the unit is switched on: any meter position but OFF.
+    pub fn powered(&self) -> bool {
+        self.meter.value() != MeterMode::Off
+    }
+
     /// The panel as the circuit wants it.
     pub fn controls(&self, input: f32, output: f32, attack: f32, release: f32) -> Controls {
         Controls {
@@ -182,6 +197,7 @@ impl Comp76Params {
             output_db: output as f64,
             attack: dial_position(attack),
             release: dial_position(release),
+            limiting: self.limiting.value(),
             buttons: [
                 self.ratio_4.value(),
                 self.ratio_8.value(),

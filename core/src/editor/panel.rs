@@ -143,7 +143,8 @@ impl View for Faceplate {
         for (x, radius, divisions) in [
             (layout::INPUT_X, R_LARGE, 10),
             (layout::OUTPUT_X, R_LARGE, 10),
-            (layout::ATTACK_X, R_SMALL, 6),
+            // OFF, then 1 to 7.
+            (layout::ATTACK_X, R_SMALL, 7),
             (layout::RELEASE_X, R_SMALL, 6),
         ] {
             let cx0 = b.x + x * sx;

@@ -128,14 +128,18 @@ impl Amplifier {
         const IMBALANCE: f64 = 0.028;
         let rest = (k * IMBALANCE).tanh();
         let shaped = (((x + IMBALANCE) * k).tanh() - rest) / (k * (1.0 - rest * rest));
-        // A slight dead band where the two halves meet.
-        const CROSSOVER: f64 = 0.0016;
-        let magnitude = shaped.abs();
-        if magnitude < CROSSOVER {
-            shaped * (magnitude / CROSSOVER)
-        } else {
-            shaped
-        }
+        // Where the two halves hand over, both conduct and the gain shifts a
+        // little. With the stage's feedback around it that is all a biased
+        // push-pull pair does there: the gain changes by a fraction, it does
+        // not go away. This used to be a dead band, which scaled anything
+        // under -56 dBFS down in proportion to its own size -- a tone at
+        // -60 dBFS came out 5.5 dB quieter with 20 % distortion, and the
+        // unit's own noise all but vanished. Quiet material went through the
+        // cleanest revision gated.
+        const CROSSOVER_WIDTH: f64 = 0.002;
+        const CROSSOVER_DEPTH: f64 = 0.01;
+        let handover = (-(shaped / CROSSOVER_WIDTH).powi(2)).exp();
+        shaped * (1.0 - CROSSOVER_DEPTH * handover)
     }
 
     pub fn reset(&mut self) {

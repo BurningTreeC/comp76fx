@@ -1,7 +1,7 @@
-//! Comp76Fx Rev F, the Silverface.
+//! Comp76Fx Rev F, a Blackface with a push-pull output.
 //!
-//! The same low noise front end as the D, but the Class A output stage has
-//! given way to a push-pull Class AB one. It is cleaner and tighter, with the
+//! The same low noise front end and panel as the D, but the Class A output
+//! stage has given way to a push-pull Class AB one. It is cleaner and tighter, with the
 //! distortion turning symmetrical, and it is the revision to reach for when
 //! the D is too thick.
 //!
@@ -15,6 +15,6 @@ export_revision! {
     name: "Comp76Fx Rev F",
     clap_id: "com.burningtreec.comp76fx.rev-f",
     vst3_id: b"Comp76Fx-RevF-01",
-    description: "Silverface FET limiting amplifier with a push-pull output stage",
+    description: "Blackface FET limiting amplifier with a push-pull output stage",
     revision: REV_F,
 }

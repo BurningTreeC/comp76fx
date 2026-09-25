@@ -19,6 +19,7 @@ const OUT_OF_CIRCUIT: Controls = Controls {
     output_db: 0.0,
     attack: 0.5,
     release: 0.5,
+    limiting: true,
     buttons: [false; 4],
 };
 

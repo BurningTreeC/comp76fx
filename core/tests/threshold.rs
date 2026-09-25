@@ -406,3 +406,47 @@ fn the_meter_rests_past_zero_with_all_buttons_in() {
         "all four rest at {all:.1} dB, which is on the scale"
     );
 }
+
+/// Pressing or releasing buttons while the unit is working carries the
+/// reduction on from where it was rather than jumping. Going from all four to
+/// one used to dip the level by 30 dB, which is what the envelope was holding
+/// against the dead zone.
+#[test]
+fn changing_buttons_mid_signal_does_not_jump() {
+    for (from, to) in [
+        ([true; 4], button(3)),
+        (button(3), [true; 4]),
+        (button(0), [true; 4]),
+    ] {
+        let controls = |buttons| Controls {
+            buttons,
+            input_db: 6.0,
+            ..Controls::default()
+        };
+        let mut channel = Channel::new(REV_D.without_noise(), FS, FACTOR, 1);
+        channel.set_controls(controls(from));
+        let w = std::f64::consts::TAU * 1000.0 / FS;
+        let mut n = 0usize;
+        let mut most = |channel: &mut Channel, samples: usize| {
+            let mut most = 0.0f64;
+            for _ in 0..samples {
+                channel.process((0.25 * (w * n as f64).sin()) as f32);
+                n += 1;
+                most = most.max(channel.gain_reduction_db());
+            }
+            most
+        };
+        let before = most(&mut channel, FS as usize);
+        channel.set_controls(controls(to));
+        let after = most(&mut channel, FS as usize / 100);
+        most(&mut channel, FS as usize * 3);
+        let settled = most(&mut channel, FS as usize / 2);
+        println!(
+            "{from:?} -> {to:?}: {before:.1} dB, then {after:.1} dB, settling at {settled:.1} dB"
+        );
+        assert!(
+            after <= before.max(settled) + 1.0,
+            "switching jumped to {after:.1} dB between {before:.1} and {settled:.1}"
+        );
+    }
+}
