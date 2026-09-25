@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "comp76fx_core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "baseview",
  "nih_plug",
@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "comp76fx_rev_a"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "comp76fx_core",
  "nih_plug",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "comp76fx_rev_d"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "comp76fx_core",
  "nih_plug",
@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "comp76fx_rev_f"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "comp76fx_core",
  "nih_plug",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "installer"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "instant"
@@ -4556,7 +4556,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "nih_plug_xtask",
 ]
