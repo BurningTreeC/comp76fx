@@ -3,7 +3,7 @@
 //! None of this is on the hardware, so it is deliberately kept out of the way:
 //! a thin dark header carrying the preset list, a save button and a settings
 //! button, and a panel behind that holding the window scale, the oversampling
-//! quality and the dry blend.
+//! quality and the wet/dry mix.
 
 // Views are constructed with `new` returning a `Handle`, which is how vizia
 // widgets are written throughout, including NIH-plug's own.
@@ -515,9 +515,14 @@ impl SettingsOverlay {
                 setting_label(cx, "OVERSAMPLING", 84.0);
                 oversampling_row(cx, 152.0, 76.0);
 
-                setting_label(cx, "DRY BLEND", 124.0);
+                // The knob is the circuit's share of the output, so it is
+                // marked at its ends like the panel's dials. It was labelled
+                // DRY BLEND, which read as the amount of dry signal: turned
+                // fully up for "all of it", it gave the opposite.
+                setting_label(cx, "MIX", 124.0);
                 Knob::new(cx, Panel::params, |p| &p.mix, 18.0).place(262.0, 152.0, 18.0);
-                caption(cx, "MIX", 262.0, 180.0);
+                caption(cx, "DRY", 262.0 - 24.0, 180.0);
+                caption(cx, "WET", 262.0 + 24.0, 180.0);
             });
             ScaleMenu::new(cx);
         });

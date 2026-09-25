@@ -554,3 +554,87 @@ fn the_output_control_drives_the_line_amplifier() {
         "raising the output from 0 to +18 dB took the distortion from {low:.3} % to {high:.3} %"
     );
 }
+
+/// The second and third harmonics of a 1 kHz tone through a revision, in dB
+/// against the fundamental.
+fn harmonics_db(revision: Revision, controls: Controls, input_db: f64) -> (f64, f64) {
+    let mut channel = Channel::new(revision, FS, 4, 1);
+    channel.set_controls(controls);
+    let amplitude = 10.0_f64.powf(input_db / 20.0);
+    let w = std::f64::consts::TAU * 1000.0 / FS;
+    for n in 0..FS as usize {
+        channel.process((amplitude * (w * n as f64).sin()) as f32);
+    }
+    let window = FS as usize;
+    let samples: Vec<f64> = (0..window)
+        .map(|n| channel.process((amplitude * (w * n as f64).sin()) as f32) as f64)
+        .collect();
+    let bin = |harmonic: f64| {
+        let (mut re, mut im) = (0.0, 0.0);
+        for (n, y) in samples.iter().enumerate() {
+            let phase = w * harmonic * n as f64;
+            re += y * phase.sin();
+            im += y * phase.cos();
+        }
+        (re * re + im * im).sqrt()
+    };
+    let fundamental = bin(1.0);
+    (
+        20.0 * (bin(2.0) / fundamental).log10(),
+        20.0 * (bin(3.0) / fundamental).log10(),
+    )
+}
+
+/// The Rev A's output stage is the Rev D's -- the same transistor, the same
+/// transformer -- and what it has besides is a JFET at the head of each
+/// amplifier, whose square law makes second harmonic and no third. So with
+/// the gain element idle the two revisions' third harmonics match and the
+/// Rev A's second stands clear. When the Rev A's output stage was simply run
+/// harder instead, its third was 3 dB up as well.
+#[test]
+fn the_rev_a_amplifiers_add_second_harmonic_only() {
+    let idle = Controls {
+        limiting: false,
+        ..Controls::default()
+    };
+    let (a2, a3) = harmonics_db(dsp::REV_A.without_noise(), idle, -12.0);
+    let (d2, d3) = harmonics_db(REV_D, idle, -12.0);
+    println!("at -12 dBFS: Rev A 2nd {a2:.1} 3rd {a3:.1} dB, Rev D 2nd {d2:.1} 3rd {d3:.1} dB");
+    assert!(
+        a2 > d2 + 2.5,
+        "the Rev A's second harmonic is only {:.1} dB up",
+        a2 - d2
+    );
+    assert!(
+        (a3 - d3).abs() < 0.5,
+        "the third harmonics differ by {:.1} dB",
+        a3 - d3
+    );
+}
+
+/// The Rev A's preamplifier colours ahead of the output control, so trading
+/// input for output -- the same level into the line amplifier, 12 dB more
+/// through the preamplifier -- makes it dirtier. The bipolar preamplifier of
+/// the Rev D adds nothing to trade, and its distortion stays where it was.
+#[test]
+fn the_rev_a_preamplifier_colours_ahead_of_the_output_control() {
+    let idle = |input_db, output_db| Controls {
+        input_db,
+        output_db,
+        limiting: false,
+        ..Controls::default()
+    };
+    let second = |revision: Revision, controls| harmonics_db(revision, controls, -18.0).0;
+    let rev_a = dsp::REV_A.without_noise();
+    let a_moved = second(rev_a, idle(12.0, -12.0)) - second(rev_a, idle(0.0, 0.0));
+    let d_moved = second(REV_D, idle(12.0, -12.0)) - second(REV_D, idle(0.0, 0.0));
+    println!("12 dB from output to input: Rev A 2nd {a_moved:+.2} dB, Rev D {d_moved:+.2} dB");
+    assert!(
+        a_moved > 2.0,
+        "the Rev A's second harmonic moved {a_moved:.2} dB"
+    );
+    assert!(
+        d_moved.abs() < 0.2,
+        "the Rev D's second harmonic moved {d_moved:.2} dB"
+    );
+}

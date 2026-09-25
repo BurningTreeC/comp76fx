@@ -61,10 +61,10 @@ The workspace is `cargo fmt` clean, and CI runs `cargo fmt --all --check` before
 - NIH-plug is pinned to one git rev in `Cargo.toml` and `xtask/Cargo.toml`. Keep the two in step.
 
 **Signal path** (`core/src/dsp/`). `Channel::process` runs one sample through the oversampler closure in this order:
-1. `Fet::process`, applying the reduction the detector asked for last.
-2. `Detector::process_in_loop` is fed the FET output (the hardware's preamp output) through a 5 Hz DC-blocking coupling (`SIDECHAIN_COUPLING_HZ`), and returns the next reduction. The output stage is outside the loop, as on the hardware; `the_output_stage_is_outside_the_loop` checks it.
+1. `Fet::process`, applying the reduction the detector asked for last, then `Preamp::process`. The preamp is linear for `Transistors::Bipolar` (Rev D, F) and a JFET square law inside a feedback loop for `Transistors::Jfet` (Rev A), solved in closed form (`amp::SquareLaw`, sized by `JFET_CURVE` and `JFET_CUTOFF`). Its curvature is oriented the same way as the Class A shaper's, because the chain from the preamp JFET to the output transistor doesn't invert.
+2. `Detector::process_in_loop` is fed the preamp output through a 5 Hz DC-blocking coupling (`SIDECHAIN_COUPLING_HZ`), and returns the next reduction. The output stage is outside the loop, as on the hardware; `the_output_stage_is_outside_the_loop` checks it.
 3. The preamp's noise is added, then the output control's gain, both ahead of the line amplifier as on the hardware. The noise is set by `noise_amplitude` from the revision's `signal_to_noise_db` (the manual's figure: S/N at the 20:1 threshold, 30 Hz–15.7 kHz, 6 dB/oct) at a constant density, so it doesn't change with the host rate or oversampling.
-4. `Amplifier::process`: coupling high-pass, Class A or AB shaper, bandwidth low-pass. The Class AB crossover is a small gain change around zero, not a dead band; `quiet_signals_pass_every_revision_intact` guards it.
+4. `Amplifier::process`: coupling high-pass, the Rev A's JFET line-amp input (the same `SquareLaw`), Class A or AB shaper, bandwidth low-pass. The Rev A's output stage is the Rev D's (same `amp_drive`); its extra colour is the JFETs' second harmonic, and `the_rev_a_amplifiers_add_second_harmonic_only` holds its third harmonic at the Rev D's. The Class AB crossover is a small gain change around zero, not a dead band; `quiet_signals_pass_every_revision_intact` guards it.
 
 After the oversampler, a `Delay` pads the output to the constant `dsp::LATENCY` (74 samples, the 8x figure), so the latency is the same at every oversampling setting. Input and output gains are computed in `apply_controls`, not per sample. When `Controls::compressing()` is false (no ratio button, or `limiting` off: the attack knob's OFF position) the gain element and the detector are bypassed, and the detector is reset.
 
@@ -100,7 +100,7 @@ The detector works in dB: demand = `limit(k · knee(level − threshold))`, then
 **Tests.**
 - `core/tests/compression.rs`: bench-style measurements of ratio, timing, THD and the differences between revisions.
 - `core/tests/calibration.rs`: detector timing, dial ends, noise floor against oversampling, VU needle geometry, frequency response at every rate and factor.
-- `core/tests/latency.rs`: the reported latency equals the real one at every factor; the dry blend doesn't comb; power off keeps the timing.
+- `core/tests/latency.rs`: the reported latency equals the real one at every factor; blending in the dry signal doesn't comb; power off keeps the timing.
 - `core/tests/threshold.rs`: the 1176LN manual's own ratio test (§13 of its calibration procedure), each button's threshold and knee, and the sidechain tap.
 - `the_built_in_presets_come_back_at_unity`: every built-in preset except Parallel Smash returns a −18 dBFS tone at unity. Anything that changes how hard a ratio works has to re-trim their output values.
 - `core/tests/scaling.rs`: window-size persistence.

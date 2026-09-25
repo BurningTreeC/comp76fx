@@ -13,8 +13,11 @@ builds as CLAP and VST3.
 Each revision's switch bank is read off its own schematic in the UREI manual,
 and the noise is the manual's 80 dB signal to noise at threshold for the low
 noise units, with the Rev A 3.4 dB worse as a side by side measurement found.
-How hard each one's FET and output stage are driven is documented only in
-direction, so those are voicing.
+The amplifiers are the schematics' too: the Rev A's preamplifier and line
+amplifier each start with a JFET, where the later units use bipolar
+transistors. Its output stage is the same Class A transistor and transformer as
+the Rev D's. How hard each one's FET and output stage are driven, and how much
+the JFETs colour, is documented only in direction, so those are voicing.
 
 They are not affiliated with, endorsed by, or connected to Universal Audio or
 any other manufacturer. Model numbers are used only to say which circuit is
@@ -60,6 +63,14 @@ much as 20 dB without oversampling, and held the excess for the whole release.
 * **The gain element is a FET** used as a voltage controlled resistor, and it
   distorts the audio passing through it increasingly as it is pulled down.
   That is most of why the unit sounds the way it does when it is working hard.
+* **The Rev A's amplifiers start with JFETs.** A JFET's current follows the
+  square of its gate voltage, so inside each amplifier's feedback loop it adds
+  second harmonic, in proportion to the signal, and no third. It bends
+  over smoothly where the JFET cuts off. There are two: the preamplifier's,
+  ahead of the output control, where the loop holds its level steady while
+  the unit limits, and the line amplifier's, after it. With the limiting
+  off, trading input for output therefore changes a Rev A's colour but not a
+  Rev D's.
 * **The recovery runs two stages together**, so it is program dependent rather
   than a fixed curve.
 * **The sidechain runs out of rail** rather than clipping, but only where a
@@ -109,13 +120,13 @@ and the tests in `core/tests/compression.rs`:
 | distortion, idle at −18 dBFS | Rev A 0.48 %, Rev D 0.33 %, Rev F 0.05 % |
 | frequency response | within 0.53 dB across 20 Hz to 20 kHz |
 | signal to noise at threshold, the manual's way | Rev A 76.5 dB, Rev D 80 dB, Rev F 80 dB, at every sample rate and oversampling setting |
-| latency | 74 samples at every oversampling setting, dry blend included |
+| latency | 74 samples at every oversampling setting, the wet/dry mix included |
 
 `core/tests/calibration.rs` holds the published figures to those tolerances,
 including the response at every sample rate and oversampling setting, the ends
 of the dials, and the meter's needle against the marks printed on its own
 face. `core/tests/latency.rs` holds the reported latency to the real one and
-the dry blend in line with the wet signal. `core/tests/threshold.rs` runs the
+the dry signal the mix blends in, in line with the wet one. `core/tests/threshold.rs` runs the
 manual's own ratio test and holds each button's threshold and knee, and
 all-button mode's switch bank, timing and meter.
 
@@ -148,8 +159,9 @@ referred to a sine, so a tone peaking at −18 dBFS sits on 0 VU at +4.
 
 The strip above the panel is not on the hardware. It carries the preset drop
 down, a save button and the settings button, which holds the window scale
-(50 % to 200 %), the oversampling quality and the dry blend. The plugin reports
-the same latency at every oversampling setting, and the dry blend and the
+(50 % to 200 %), the oversampling quality and the wet/dry **mix**, turned fully
+up to WET for the circuit alone. The plugin reports the same latency at every
+oversampling setting, and the dry signal the mix blends in and the
 switched-off signal are delayed to match, so neither moves the track against
 the rest of the session.
 
@@ -217,6 +229,6 @@ python3 tools/third-party-notices.py
 | `core/src/presets.rs` | built-in and saved presets |
 | `rev_a`, `rev_d`, `rev_f` | one identity each: names and plugin ids |
 | `core/tests/compression.rs` | the measurements above |
-| `core/tests/latency.rs` | reported latency and the dry blend's alignment |
+| `core/tests/latency.rs` | reported latency and the dry signal's alignment |
 | `core/tests/threshold.rs` | the threshold circuit against the manual |
 | `vendor/baseview` | the GUI window backend, patched for Windows; see its `PATCHES.md` |

@@ -11,7 +11,7 @@ pub mod oversample;
 pub mod revisions;
 
 use amp::OnePole;
-pub use amp::{Amplifier, OutputStage};
+pub use amp::{Amplifier, OutputStage, Preamp, Transistors};
 pub use delay::Delay;
 pub use detector::{Detector, Timing};
 pub use fet::Fet;
@@ -242,6 +242,8 @@ pub struct Revision {
     /// Folder name for this plugin's own saved presets. Each revision is a
     /// separate plugin, so each keeps its own.
     pub slug: &'static str,
+    /// What the preamplifier and the line amplifier are built on.
+    pub transistors: Transistors,
     pub stage: OutputStage,
     /// How hard the output stage is run, and so how much it colours.
     pub amp_drive: f64,
@@ -409,6 +411,7 @@ pub struct Channel {
     revision: Revision,
     detector: Detector,
     fet: Fet,
+    preamp: Preamp,
     amp: Amplifier,
     oversampler: Oversampler,
     sample_rate: f64,
@@ -440,7 +443,13 @@ impl Channel {
             revision,
             detector: Detector::new(internal),
             fet: Fet::new(revision.fet_drive, revision.fet_bias),
-            amp: Amplifier::new(revision.stage, revision.amp_drive, internal),
+            preamp: Preamp::new(revision.transistors),
+            amp: Amplifier::new(
+                revision.stage,
+                revision.amp_drive,
+                revision.transistors,
+                internal,
+            ),
             oversampler,
             sample_rate,
             controls: Controls::default(),
@@ -564,6 +573,7 @@ impl Channel {
         let Self {
             detector,
             fet,
+            preamp,
             amp,
             oversampler,
             reduction_db,
@@ -583,15 +593,15 @@ impl Channel {
             // measurement puts it: turning the input down barely changes it,
             // and it comes through the output control with the signal.
             if !compressing {
-                return amp.process((x + white(noise) * noise_gain) * output_gain);
+                return amp.process((preamp.process(x) + white(noise) * noise_gain) * output_gain);
             }
             // The gain element runs on what the detector asked for, and the
             // detector is fed what came out, which is how the loop is closed.
-            // It is fed from the preamplifier, straight after the gain
-            // element and ahead of the output control and the line amplifier,
-            // which is where the unit's divider takes it: the output stage's
-            // colour is outside the loop, as it is on the hardware.
-            let reduced = fet.process(x, -*reduction_db);
+            // It is fed from the preamplifier's output, ahead of the output
+            // control and the line amplifier, which is where the unit's
+            // divider takes it: the output stage's colour is outside the
+            // loop, as it is on the hardware.
+            let reduced = preamp.process(fet.process(x, -*reduction_db));
             *reduction_db = detector.process_in_loop(coupling.highpass(reduced));
             *meter_db = meter_db.max(detector.control_db());
             amp.process((reduced + white(noise) * noise_gain) * output_gain)
