@@ -89,16 +89,20 @@ pub struct Timing {
     pub attack: f64,
     pub release: f64,
     /// Where the sidechain starts working, in dBFS. Set by the ratio button,
-    /// and moved further by a combination of them: several ratio resistors in
-    /// parallel is more sidechain gain than any one of them, and the bias
-    /// shift has the FET part way on before the signal arrives.
+    /// and raised by a combination of them, which shorts part of the signal
+    /// ladder and so passes the rectifier less signal.
     pub threshold: f64,
     /// Width of the knee, in dB. The rectifier diodes give every button one,
-    /// narrow at 20:1 and several decibels wide at 4:1; a combination opens
-    /// it much further, which makes the sidechain come on gradually and lets
-    /// the leading edge of a transient through before the gain collapses
-    /// behind it.
+    /// narrow at 20:1 and several decibels wide at 4:1.
     pub knee: f64,
+    /// How far below the point where the gain element starts to conduct the
+    /// gate is resting, in dB of control. Zero with one button in. A
+    /// combination pulls the gate's bias down, and the sidechain then has to
+    /// charge the envelope through this much before any gain reduction
+    /// happens: the front of a transient is through before the gain moves,
+    /// the release reaches no reduction sooner, and the level it takes to
+    /// start compressing rises.
+    pub dead_zone: f64,
 }
 
 pub struct Detector {
@@ -123,6 +127,7 @@ impl Detector {
                 release: RELEASE_FASTEST,
                 threshold: THRESHOLD_DB,
                 knee: 0.0,
+                dead_zone: 0.0,
             },
             attack_coef: 0.0,
             release_fast: 0.0,
@@ -192,9 +197,36 @@ impl Detector {
         self.charge(demand)
     }
 
-    /// The gain reduction the detector is asking for now, in dB.
+    /// The gain reduction the detector is asking for now, in dB: whatever
+    /// of the envelope has got past the dead zone.
     pub fn reduction(&self) -> f64 {
+        (self.envelope() - self.timing.dead_zone).max(0.0)
+    }
+
+    /// The control voltage as the gain reduction meter reads it, in dB. The
+    /// meter measures the gate's bias against the rest point it was
+    /// calibrated at, so with the gate pulled below that point it reads
+    /// less than no reduction -- the needle rests past zero -- until the
+    /// envelope has charged through the dead zone, and then reads true.
+    pub fn control_db(&self) -> f64 {
+        self.envelope() - self.timing.dead_zone
+    }
+
+    /// The charge on the envelope, from the gate's actual resting point.
+    fn envelope(&self) -> f64 {
         self.fast * (1.0 - SLOW_STAGE_SHARE) + self.slow * SLOW_STAGE_SHARE
+    }
+
+    /// The reduction an envelope of `envelope` makes, and how fast that moves
+    /// with it.
+    #[inline]
+    fn past_dead_zone(&self, envelope: f64) -> (f64, f64) {
+        let past = envelope - self.timing.dead_zone;
+        if past > 0.0 {
+            (past, 1.0)
+        } else {
+            (0.0, 0.0)
+        }
     }
 
     /// Charging is one time constant, recovery is two running together.
@@ -214,7 +246,11 @@ impl Detector {
         // the sidechain's own: dividing by `1 + k` here as well would apply
         // the ratio twice, since closing the loop is what produces that term.
         let (over, d_over) = knee_with_slope(level_db - self.timing.threshold, self.timing.knee);
-        let (demand, d_demand) = limit_with_slope(over * self.timing.k);
+        // The rail is an absolute limit on the control voltage. A gate
+        // resting lower has that much further to go to reach it, so the
+        // demand the envelope can be driven to rises with the dead zone and
+        // the most reduction available does not change.
+        let (demand, d_demand) = limit_with_slope(over * self.timing.k, self.timing.dead_zone);
         (demand, d_demand * self.timing.k * d_over)
     }
 
@@ -242,14 +278,14 @@ impl Detector {
     /// The demand that agrees with the reduction it causes.
     ///
     /// `unreduced` is the level the rectifier would see with no reduction.
-    /// The root of `h(d) = d - demand(unreduced - landing(d))` is found by
+    /// The root of `h(d) = d - demand(unreduced - reduction(landing(d)))` is found by
     /// Newton's method inside a bracket that always holds it: `h` rises with
     /// `d`, is below zero at nothing, and is at or above zero at the demand
     /// the envelope would meet if it released as far as it can this sample.
     #[inline]
     fn solve(&self, unreduced: f64) -> f64 {
         let (floor, _) = self.landing(0.0);
-        let (ceiling, _) = self.demand(unreduced - floor);
+        let (ceiling, _) = self.demand(unreduced - self.past_dead_zone(floor).0);
         // Still under the operating point after releasing: nothing to solve,
         // which is also every sample below threshold and near a zero crossing.
         if ceiling <= 0.0 {
@@ -260,7 +296,8 @@ impl Detector {
         let mut demand = ceiling;
         for _ in 0..SOLVE_STEPS {
             let (landed, d_landed) = self.landing(demand);
-            let (wanted, d_wanted) = self.demand(unreduced - landed);
+            let (reduced, d_reduced) = self.past_dead_zone(landed);
+            let (wanted, d_wanted) = self.demand(unreduced - reduced);
             let error = demand - wanted;
             if error.abs() <= SOLVE_TOLERANCE_DB {
                 break;
@@ -271,7 +308,7 @@ impl Detector {
                 low = demand;
             }
             // The slope is at least one, so the step is always defined.
-            let next = demand - error / (1.0 + d_wanted * d_landed);
+            let next = demand - error / (1.0 + d_wanted * d_reduced * d_landed);
             demand = if next > low && next < high {
                 next
             } else {
@@ -324,18 +361,20 @@ fn knee_with_slope(over: f64, width: f64) -> (f64, f64) {
 /// the knee, so the ratio the buttons mark is the ratio the loop settles at.
 #[inline]
 pub fn limit_demand(raw: f64) -> f64 {
-    limit_with_slope(raw).0
+    limit_with_slope(raw, 0.0).0
 }
 
-/// [`limit_demand`] and its derivative.
+/// [`limit_demand`] and its derivative. `lift` raises the whole curve, rail
+/// and all, for a gate resting lower.
 #[inline]
-fn limit_with_slope(raw: f64) -> (f64, f64) {
-    if raw <= DEMAND_LINEAR_DB {
+fn limit_with_slope(raw: f64, lift: f64) -> (f64, f64) {
+    let linear = DEMAND_LINEAR_DB + lift;
+    if raw <= linear {
         return (raw, 1.0);
     }
     let span = MAX_DEMAND_DB - DEMAND_LINEAR_DB;
-    let bend = ((raw - DEMAND_LINEAR_DB) / span).tanh();
-    (DEMAND_LINEAR_DB + span * bend, 1.0 - bend * bend)
+    let bend = ((raw - linear) / span).tanh();
+    (linear + span * bend, 1.0 - bend * bend)
 }
 
 /// A sample's level in dB. The offset keeps silence finite.

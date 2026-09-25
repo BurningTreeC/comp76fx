@@ -36,12 +36,12 @@ the threshold circuit.
 * **Each ratio has its own threshold.** The buttons switch a DC divider that
   biases the rectifier diodes along with the signal divider that feeds them,
   and the manual says "selecting higher ratios also raises the threshold
-  level": −24, −25 and −26 dB for 20:1, 12:1 and 8:1, and the 4:1 a decibel
-  below that.
+  level": −24, −25 and −26 dB for 20:1, 12:1 and 8:1, and for 4:1 "the
+  lowest threshold is −30 dB", where its soft knee begins.
 * **The knee is softest at 4:1.** A diode turns on over a span of voltage, not
   at a point, and that span covers the most decibels where the signal at the
   diodes is smallest. The 4:1 passes the smallest share of the smallest
-  signal, about a ninth of the 20:1's, so its knee is about nine times as
+  signal, about a tenth of the 20:1's, so its knee is about ten times as
   wide: the "soft knee in the threshold circuit for this ratio" that the
   manual measures its ratio test around. The manual gives no width; the size
   of all four is bounded by that test.
@@ -61,13 +61,28 @@ much as 20 dB without oversampling, and held the excess for the whole release.
   same number, so a curve that bends from the origin bends the static ratio
   with it and every button reads low. It stays linear across the range the
   unit works in and turns over only near the rail.
-* **All-button mode** opens the knee out instead of switching to another
-  ratio. The shifted bias leaves the sidechain with no definite point at which
-  it starts working, so the gain arrives over a range of level and the front of
-  a transient is through before much of it has. Because the detector is fed the
-  compressed output, the width of that knee sets the ratio as well as the
-  shape, which is why it lands between 12:1 and 20:1 and keeps climbing the
-  harder the unit is driven.
+* **All-button mode is modelled on the switch bank as the schematic draws
+  it.** Each button connects a tap on two resistor ladders, one feeding the
+  sidechain and one in the gate's bias network, and pressing several joins
+  their taps, which shorts everything between the lowest and highest pressed.
+  So only the outer buttons matter (4 + 20 is all four, as Universal Audio
+  notes), and all four:
+  * pass the sidechain 0.456 of the signal against the 20:1's 0.802, which
+    sets a threshold and ratio between the 8:1's and the 12:1's;
+  * pull the gate's resting bias from −2.0 V to −3.2 V (a circuit simulation
+    of the mode posted to GroupDIY), so the sidechain has to charge through a
+    dead zone before the FET opens: the attack lags, the release reaches no
+    reduction far sooner, the reduction is lighter than a plain ratio's at
+    the same drive, and the gain reduction meter, which reads that bias,
+    rests pinned past zero;
+  * throw off the gate's distortion-cancelling feedback, so the gain element
+    bends the signal further.
+
+  It measures 15:1 at every drive level, the middle of the manual's
+  "somewhere between 12:1 and 20:1". Two figures are not documented and are
+  assumptions: how many decibels of control the 1.2 V bias drop is worth
+  (taken as 30 dB, the drop's share of the gate's roughly 2 V working range),
+  and how much it raises the loop gain, which is fitted to that range.
 
 Measured by `cargo run --release -p comp76fx_core --example bench -- --spec`
 and the tests in `core/tests/compression.rs`:
@@ -78,7 +93,7 @@ and the tests in `core/tests/compression.rs`:
 | 8:1 button | 8.07:1 |
 | 12:1 button | 12.12:1 |
 | 20:1 button | 20.26:1 |
-| all four in | 19.2:1 driven, 16.4:1 gently |
+| all four in | 15.1:1 driven, 15.4:1 gently; 4 + 20 identical |
 | threshold | 20:1 at −24.0 dBFS; 12:1, 8:1 and 4:1 at −1.0, −2.0 and −3.0 dB from it |
 | knee | reduction already at threshold: 0.16, 0.27, 0.41 and 0.74 dB from 20:1 to 4:1 |
 | the manual's ratio test | 20:1, 12:1 and 8:1 from 1 dB of limiting, 4:1 from 3 dB: all within 12 % against its 20 % |
@@ -95,15 +110,13 @@ including the response at every sample rate and oversampling setting, the ends
 of the dials, and the meter's needle against the marks printed on its own
 face. `core/tests/latency.rs` holds the reported latency to the real one and
 the dry blend in line with the wet signal. `core/tests/threshold.rs` runs the
-manual's own ratio test and holds each button's threshold and knee.
+manual's own ratio test and holds each button's threshold and knee, and
+all-button mode's switch bank, timing and meter.
 
-Two of those are worth reading twice. All-button mode has no single ratio: its
-knee is wide enough that the slope is still opening out at light reduction, so
-the figure only means anything at a stated operating point, which is the same
-caveat the manual's own "somewhere between 12:1 and 20:1" carries. And the
-ratios sit about a percent high because the unit's own distortion takes energy
-out of the fundamental the measurement reads; the loop itself, linearised,
-lands a percent low, and the two nearly cancel.
+One of those is worth reading twice. The ratios sit about a percent high
+because the unit's own distortion takes energy out of the fundamental the
+measurement reads; the loop itself, linearised, lands a percent low, and the
+two nearly cancel.
 
 ## Controls
 
@@ -136,9 +149,11 @@ Saving under the name of one of your own, in any capitalisation, replaces it. A 
 saving under its name writes a preset of your own beside it rather than
 replacing it in the list; replacing it would put it out of reach for good.
 
-Built-in presets include **All Buttons In**: all four switches in, both dials
-wide open, driven hard, with the make-up set so a tone at −18 dBFS comes
-back at unity, as every built-in preset but the parallel one does.
+Built-in presets include **All Buttons In**: all four switches in with attack
+and release fully fast, the documented setting for drum rooms and
+"in your face" vocals, driven so a −18 dBFS signal takes about 10 dB of
+reduction, with the make-up set so it comes back at unity, as every built-in
+preset but the parallel one does.
 
 ## Building
 

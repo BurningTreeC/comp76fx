@@ -205,6 +205,7 @@ fn detector_times(knob_attack: f64, knob_release: f64) -> (f64, f64) {
         ),
         threshold: detector::THRESHOLD_DB,
         knee: 0.0,
+        dead_zone: 0.0,
     });
     // A steady level well above the operating point.
     let level = 10f64.powf(-6.0 / 20.0);

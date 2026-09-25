@@ -188,7 +188,7 @@ impl Comp76 {
                 .strips
                 .iter_mut()
                 .map(Strip::take_meter)
-                .fold(0.0f32, f32::max);
+                .fold(f32::NEG_INFINITY, f32::max);
             let loudest = self.energy.iter().copied().fold(0.0f64, f64::max);
             self.meters
                 .publish(reduction, loudest as f32, buffer.samples() as u32);

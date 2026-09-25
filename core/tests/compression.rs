@@ -90,11 +90,9 @@ fn no_buttons_means_no_gain_reduction() {
 
 #[test]
 fn all_buttons_lands_between_twelve_and_twenty() {
-    // Measured driven, which is the only way the mode is ever used. Its knee
-    // is wide enough that the slope is still opening out at light gain
-    // reduction, so a ratio quoted for it only means anything at a stated
-    // operating point -- the same caveat the manual's own loose "somewhere
-    // between" carries.
+    // Measured driven, which is how the mode is used. The manual's own figure
+    // is loose -- "somewhere between" -- and the model is fitted to its
+    // middle; see `DEAD_ZONE_LOOP_GAIN`.
     let controls = Controls {
         buttons: [true; 4],
         input_db: 20.0,
@@ -105,49 +103,6 @@ fn all_buttons_lands_between_twelve_and_twenty() {
     assert!(
         (12.0..=20.0).contains(&measured),
         "all-button mode measured {measured:.2}:1"
-    );
-}
-
-/// The knee is what the mode is for: it should take hold later and more
-/// gradually than a plain ratio, and then pull further past it.
-#[test]
-fn all_buttons_has_a_softer_knee_than_a_plain_ratio() {
-    let all = Controls {
-        buttons: [true; 4],
-        input_db: 20.0,
-        ..Controls::default()
-    };
-    let four = Controls {
-        buttons: buttons(0),
-        ..all
-    };
-
-    // Driven the same, the mode reduces more than the gentlest ratio does.
-    let all_hard = steady_output_db(all, -20.0);
-    let four_hard = steady_output_db(four, -20.0);
-    assert!(
-        all_hard < four_hard,
-        "all buttons in should hold the level down harder: {all_hard:.2} against {four_hard:.2}"
-    );
-
-    // And the slope keeps opening out as it is driven, rather than settling on
-    // one figure the way a fixed ratio does. Held against the 4:1 button
-    // rather than against a number, so it measures the difference the knee
-    // makes instead of whatever the loop happens to settle at.
-    let spread = |c: Controls| {
-        let gentle = measured_ratio(Controls { input_db: 6.0, ..c });
-        let driven = measured_ratio(c);
-        (gentle, driven, driven / gentle)
-    };
-    let (a_gentle, a_driven, a_spread) = spread(all);
-    let (f_gentle, f_driven, f_spread) = spread(four);
-    println!("all buttons in   {a_gentle:.2}:1 gentle, {a_driven:.2}:1 driven  ({a_spread:.3}x)");
-    println!("4:1              {f_gentle:.2}:1 gentle, {f_driven:.2}:1 driven  ({f_spread:.3}x)");
-    // How far each opens out, not how far apart the two figures are: a fixed
-    // ratio barely moves, so it is the departure from 1 that is being compared.
-    assert!(
-        (a_spread - 1.0) > (f_spread - 1.0) * 5.0,
-        "the knee should open out far more than a fixed ratio: {a_spread:.3}x against {f_spread:.3}x"
     );
 }
 

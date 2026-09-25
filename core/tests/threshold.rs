@@ -1,11 +1,14 @@
-//! The threshold circuit, held to the 1176LN manual.
+//! The threshold circuit and the ratio switch bank, held to the 1176LN manual
+//! and the Rev D schematic.
 //!
-//! The ratio buttons switch two dividers at once: the one that feeds the
-//! sidechain, which sets the ratio, and a DC one that biases the rectifier
-//! diodes, which sets the threshold. So each ratio has a threshold of its own,
-//! and the diodes' gradual turn-on gives each a knee, softest at 4:1. The
-//! sidechain takes its signal from the preamplifier, after the gain element
-//! and before the output control and line amplifier.
+//! The ratio buttons switch two ladders at once: the one that feeds the
+//! sidechain, which sets the ratio, and one in the bias network, which sets
+//! the threshold and where the gate rests. So each ratio has a threshold of
+//! its own, and the diodes' gradual turn-on gives each a knee, softest at
+//! 4:1. The sidechain takes its signal from the preamplifier, after the gain
+//! element and before the output control and line amplifier. Pressing several
+//! buttons shorts both ladders between the outermost two, which is all that
+//! all-button mode is.
 
 use comp76fx_core::dsp::{
     detector, Channel, Controls, OutputStage, Revision, REV_D, REV_F, THRESHOLD_OFFSETS_DB,
@@ -255,4 +258,151 @@ fn the_output_stage_is_outside_the_loop() {
             "the output stage changed the gain reduction at sample {n}"
         );
     }
+}
+
+/// The outputs of two channels fed the same tone, compared sample for sample.
+fn identical(a: [bool; 4], b: [bool; 4]) -> bool {
+    let controls = |buttons| Controls {
+        buttons,
+        input_db: 12.0,
+        ..Controls::default()
+    };
+    let mut first = Channel::new(REV_D.without_noise(), FS, FACTOR, 1);
+    let mut second = Channel::new(REV_D.without_noise(), FS, FACTOR, 1);
+    first.set_controls(controls(a));
+    second.set_controls(controls(b));
+    let w = std::f64::consts::TAU * 440.0 / FS;
+    (0..(FS as usize / 4)).all(|n| {
+        let x = (0.3 * (w * n as f64).sin()) as f32;
+        first.process(x) == second.process(x)
+    })
+}
+
+/// Pressing buttons joins their contacts, so everything between the lowest
+/// and the highest pressed is shorted and the buttons in between change
+/// nothing -- Universal Audio: "only the 'outside' ratios are relevant".
+#[test]
+fn only_the_outermost_buttons_matter() {
+    assert!(
+        identical([true; 4], [true, false, false, true]),
+        "4 + 20 is all four"
+    );
+    assert!(
+        identical([false, true, true, true], [false, true, false, true]),
+        "8 + 20 is 8 + 12 + 20"
+    );
+    assert!(
+        identical([true, true, true, false], [true, false, true, false]),
+        "4 + 12 is 4 + 8 + 12"
+    );
+    assert!(
+        !identical([true; 4], [false, false, false, true]),
+        "all four is not 20:1"
+    );
+}
+
+/// "Less attenuation than standard ratios" (ioplex's simulation): the shorted
+/// ladder passes the sidechain less signal and the gate rests further off,
+/// so driven the same, all four reduce less than the 20:1 alone.
+#[test]
+fn all_buttons_reduces_less_than_twenty_to_one() {
+    let controls = |buttons| Controls {
+        buttons,
+        ..Controls::default()
+    };
+    for level in [-16.0, -10.0, -4.0] {
+        let (all, _) = measure(REV_D, controls([true; 4]), 1000.0, level);
+        let (twenty, _) = measure(REV_D, controls(button(3)), 1000.0, level);
+        println!("tone at {level} dBFS: all four {all:.1} dB, 20:1 {twenty:.1} dB");
+        assert!(
+            all < twenty,
+            "all four reduced more than 20:1 at {level} dBFS"
+        );
+    }
+}
+
+/// Time from a tone's start to 1 dB of reduction, in ms.
+fn onset_ms(buttons: [bool; 4], attack: f64) -> f64 {
+    let mut channel = Channel::new(REV_D.without_noise(), FS, FACTOR, 1);
+    channel.set_controls(Controls {
+        buttons,
+        attack,
+        input_db: 12.0,
+        ..Controls::default()
+    });
+    let w = std::f64::consts::TAU * 1000.0 / FS;
+    (0..(FS as usize / 10))
+        .find(|&n| {
+            channel.process((0.25 * (w * n as f64).sin()) as f32);
+            channel.gain_reduction_db() >= 1.0
+        })
+        .map_or(f64::INFINITY, |n| n as f64 / FS * 1000.0)
+}
+
+/// Time for the reduction to come back under 1 dB after the tone stops, in ms.
+fn recovery_ms(buttons: [bool; 4], release: f64) -> f64 {
+    let mut channel = Channel::new(REV_D.without_noise(), FS, FACTOR, 1);
+    channel.set_controls(Controls {
+        buttons,
+        release,
+        input_db: 12.0,
+        ..Controls::default()
+    });
+    let w = std::f64::consts::TAU * 1000.0 / FS;
+    for n in 0..(FS as usize) {
+        channel.process((0.25 * (w * n as f64).sin()) as f32);
+    }
+    (0..(FS as usize * 4))
+        .find(|_| {
+            channel.process(0.0);
+            channel.gain_reduction_db() < 1.0
+        })
+        .map_or(f64::INFINITY, |n| n as f64 / FS * 1000.0)
+}
+
+/// The gate resting lower changes the timing, as Universal Audio describes
+/// the mode: "a lag time on the attack of initial transients", and "the bias
+/// points change all over the circuit, thus changing the attack and release
+/// times as well". The envelope has to charge through the dead zone before
+/// the gain moves, and on the way down reaches it long before it would
+/// have crept back to rest.
+#[test]
+fn all_buttons_lags_the_attack_and_hurries_the_release() {
+    let (all, twenty) = ([true; 4], button(3));
+    let lag = onset_ms(all, 0.0) - onset_ms(twenty, 0.0);
+    println!("slowest attack: all four start {lag:.3} ms later than 20:1");
+    assert!(lag > 0.2, "all four start only {lag:.3} ms later than 20:1");
+    for release in [1.0, 0.5] {
+        let (fast, slow) = (recovery_ms(all, release), recovery_ms(twenty, release));
+        println!("release {release}: all four recover in {fast:.1} ms, 20:1 in {slow:.1} ms");
+        assert!(
+            fast * 3.0 < slow,
+            "all four recover in {fast:.1} ms against {slow:.1}"
+        );
+    }
+}
+
+/// The meter reads the gate's bias against the rest it was zeroed at. With
+/// the gate pulled below that the needle rests past zero -- "the meter will
+/// go wild, often resting at maximum" -- and one button in reads zero.
+#[test]
+fn the_meter_rests_past_zero_with_all_buttons_in() {
+    let resting = |buttons| {
+        let mut channel = Channel::new(REV_D.without_noise(), FS, FACTOR, 1);
+        channel.set_controls(Controls {
+            buttons,
+            ..Controls::default()
+        });
+        for _ in 0..4800 {
+            channel.process(0.0);
+        }
+        channel.take_meter()
+    };
+    assert_eq!(resting(button(0)), 0.0);
+    assert_eq!(resting(button(3)), 0.0);
+    let all = resting([true; 4]);
+    assert!(
+        all < -20.0,
+        "all four rest at {all:.1} dB, which is on the scale"
+    );
 }

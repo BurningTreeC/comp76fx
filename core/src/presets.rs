@@ -34,7 +34,7 @@ const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
         "Vocal 4:1",
         &[
             ("input", 12.0),
-            ("output", 3.8),
+            ("output", 4.2),
             ("attack", 5.0),
             ("release", 4.0),
             ("ratio4", 1.0),
@@ -45,15 +45,18 @@ const BUILT_IN: &[(&str, &[(&str, f32)])] = &[
         ],
     ),
     (
-        // The one everybody reaches for. All four ratio buttons in, both
-        // dials wide open, and the input driven hard enough that the unit is
-        // never out of gain reduction. The manual calls the result somewhere
-        // between 12:1 and 20:1; the lag on the attack is what lets the front
-        // of every transient through before the gain collapses behind it.
+        // The one everybody reaches for, set the way it is documented: all
+        // four buttons in with attack and release fully fast, which Universal
+        // Audio recommends for putting a vocal "in your face" and which on
+        // drum room and ambience mics squeezes the room up between the hits.
+        // Driven so a signal around -18 dBFS takes about 10 dB of reduction:
+        // working hard, with the meter pinned past zero at rest, but not the
+        // 30 dB flattening it gave before the mode was modelled on the
+        // schematic.
         "All Buttons In",
         &[
-            ("input", 0.0),
-            ("output", 19.3),
+            ("input", 6.0),
+            ("output", 4.4),
             ("attack", 7.0),
             ("release", 7.0),
             ("ratio4", 1.0),

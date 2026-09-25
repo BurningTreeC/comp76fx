@@ -14,6 +14,11 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 /// way the alignment tone does on a digital peak meter.
 const SINE_CREST_DB: f32 = 3.0103;
 
+/// The gain reduction meter can read below zero -- all-button mode leaves the
+/// gate resting past the point the meter was zeroed at -- so readings are
+/// stored this far up, which keeps them positive for `fetch_max`.
+const REDUCTION_OFFSET_DB: f32 = 100.0;
+
 /// Past this many samples an unread average is started again rather than
 /// added to. An editor that is closed never takes anything, and an average
 /// over the last hour is no use to the one that opens next. Also keeps the
@@ -23,7 +28,8 @@ const MOST_SAMPLES: u32 = 1 << 20;
 /// What the meter reads for the stretch of audio since the last reading.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reading {
-    /// The deepest gain reduction reached, in dB, always positive.
+    /// The highest the gain reduction meter read, in dB. Negative when the
+    /// needle is resting past zero.
     pub reduction_db: f32,
     /// Output level in dBFS, from the average power and referred to a sine.
     pub output_db: f32,
@@ -39,8 +45,8 @@ impl Reading {
 
 #[derive(Default)]
 pub struct Meters {
-    /// Deepest gain reduction since the editor last took a reading, in
-    /// hundredths of a dB.
+    /// Highest gain reduction reading since the editor last took one, in
+    /// hundredths of a dB, raised by [`REDUCTION_OFFSET_DB`].
     reduction: AtomicU32,
     /// Output energy since the editor last took a reading: an `f32` sum of
     /// squares in the high half and the number of samples it covers in the
@@ -57,8 +63,10 @@ impl Meters {
         if samples == 0 {
             return;
         }
-        self.reduction
-            .fetch_max((reduction_db.max(0.0) * 100.0) as u32, Ordering::Relaxed);
+        self.reduction.fetch_max(
+            ((reduction_db + REDUCTION_OFFSET_DB).max(0.0) * 100.0) as u32,
+            Ordering::Relaxed,
+        );
         let mut current = self.output.load(Ordering::Relaxed);
         loop {
             let (sum, count) = unpack(current);
@@ -88,7 +96,8 @@ impl Meters {
         if count == 0 {
             return None;
         }
-        let reduction = self.reduction.swap(0, Ordering::Relaxed) as f32 / 100.0;
+        let reduction =
+            self.reduction.swap(0, Ordering::Relaxed) as f32 / 100.0 - REDUCTION_OFFSET_DB;
         let mean = sum / count as f32;
         Some(Reading {
             reduction_db: reduction,
@@ -153,6 +162,23 @@ mod tests {
             "read {:.2} dBFS",
             reading.output_db
         );
+    }
+
+    /// All-button mode leaves the needle resting past zero, and the reading
+    /// has to survive being stored.
+    #[test]
+    fn a_reading_below_zero_survives() {
+        let meters = Meters::default();
+        meters.publish(-30.0, 1.0, 10);
+        let reading = meters.take().unwrap();
+        assert!(
+            (reading.reduction_db + 30.0).abs() < 0.011,
+            "read {}",
+            reading.reduction_db
+        );
+        meters.publish(-30.0, 1.0, 10);
+        meters.publish(4.0, 1.0, 10);
+        assert!((meters.take().unwrap().reduction_db - 4.0).abs() < 0.011);
     }
 
     /// An unread meter starts its average again instead of holding on to
