@@ -3,24 +3,33 @@
 //! One panel serves all three revisions. What changes between them is the
 //! lettering and, on the earliest one, the painted section around the meter.
 
+pub mod fonts;
+pub mod paint;
 pub mod panel;
 pub mod settings;
 pub mod sprites;
 pub mod style;
 pub mod widgets;
 
-use nih_plug::prelude::{Editor, Param};
-use nih_plug_vizia::vizia::prelude::*;
-use nih_plug_vizia::{assets, create_vizia_editor, ViziaState, ViziaTheming};
+#[cfg(test)]
+mod render_tests;
+
+use nice_plug::prelude::Param;
 use std::sync::Arc;
+use vizia_plug::vizia::prelude::*;
+use vizia_plug::{create_vizia_editor, ViziaState, ViziaTheming};
 
 use crate::dsp::Revision;
 use crate::meters::Meters;
 use crate::params::Comp76Params;
+use fonts::NOTO_SANS;
 use panel::Faceplate;
 use settings::{Dialogs, Header, SettingsOverlay, UiState};
 use style::*;
 use widgets::{Knob, PushButton, VuMeter};
+
+/// The editor every revision's plugin hands its host.
+pub type Editor = vizia_plug::ViziaEditor;
 
 /// Where everything sits on the panel.
 pub mod layout {
@@ -46,46 +55,29 @@ pub mod layout {
     pub const MODE_H: f32 = 30.0;
 }
 
-#[derive(Lens)]
-pub struct Panel {
-    pub params: Arc<Comp76Params>,
-}
+/// Physical pixels per unit of the panel's own layout at 100 %, as
+/// GainStageFx draws its panel. Every size in the menu is relative to it, so
+/// 200 % is 3.0, and the host's display scaling is not applied on top: the
+/// panel is the same number of pixels on every display and in every host.
+pub const BASE_DPI: f64 = 1.5;
 
-impl Model for Panel {}
-
+/// The panel at 100 %, which renders at [`BASE_DPI`].
 pub fn default_state() -> Arc<ViziaState> {
-    ViziaState::new_with_default_scale_factor(|| (PANEL_W as u32, WINDOW_H as u32), 1.0)
+    ViziaState::new_with_base_scale_factor(|| (PANEL_W as u32, WINDOW_H as u32), BASE_DPI)
 }
+
 /// Updates the scale used by `Editor::size()` and saved in the host session.
-/// Vizia's drawing scale is separate and must only change after the host has
-/// accepted the resize. `PersistentField::set` copies the carrier's scale;
-/// the original state's size function and open status stay intact.
+/// `PersistentField::set` copies the carrier's scale; the original state's
+/// size function and open status stay intact.
+///
+/// Called once the window has actually been resized to it (see
+/// `UiEvent::SetScale`). The Vizia adapter records the same figure itself
+/// when the native resize settles; this is the panel saying so as well.
 pub fn remember_scale(state: &Arc<ViziaState>, scale: f64) {
-    use nih_plug::params::persist::PersistentField;
+    use nice_plug::params::persist::PersistentField;
     let carrier = ViziaState::new_with_default_scale_factor(|| (0, 0), scale);
     if let Ok(carrier) = Arc::try_unwrap(carrier) {
         PersistentField::set(state, carrier);
-    }
-}
-
-/// Stores the requested scale before the host reads `Editor::size()`.
-/// Returns whether the UI should adopt it. A refusal restores the persisted
-/// size, so drawing and host geometry continue to agree.
-pub fn apply_scale(
-    state: &Arc<ViziaState>,
-    gui: &dyn nih_plug::prelude::GuiContext,
-    scale: f64,
-) -> bool {
-    let previous = state.user_scale_factor();
-    if scale == previous {
-        return true;
-    }
-    remember_scale(state, scale);
-    if gui.request_resize() {
-        true
-    } else {
-        remember_scale(state, previous);
-        false
     }
 }
 
@@ -96,44 +88,40 @@ pub fn create(
     params: Arc<Comp76Params>,
     revision: Revision,
     meters: Arc<Meters>,
-) -> Option<Box<dyn Editor>> {
+) -> Option<Editor> {
     let state = params.editor_state.clone();
-    let state_for_scale = state.clone();
-    create_vizia_editor(state, ViziaTheming::None, move |cx, gui| {
-        assets::register_noto_sans_regular(cx);
-        assets::register_noto_sans_bold(cx);
-        // The only styling the panel takes from a sheet rather than from its
-        // own drawing. See `style::STYLESHEET` for why it cannot be inline.
-        let _ = cx.add_stylesheet(STYLESHEET);
-
-        Panel {
-            params: params.clone(),
-        }
-        .build(cx);
-        UiState::new(
-            state_for_scale.user_scale_factor(),
-            params.clone(),
-            revision,
-            gui,
-        )
-        .build(cx);
-
-        Header::new(cx);
-
-        let params = params.clone();
-        let meters = meters.clone();
-        VStack::new(cx, move |cx| {
-            faceplate(cx, revision, params.clone(), meters.clone());
-        })
-        .position_type(PositionType::SelfDirected)
-        .left(Pixels(0.0))
-        .top(Pixels(HEADER_H))
-        .width(Pixels(PANEL_W))
-        .height(Pixels(PANEL_H));
-
-        SettingsOverlay::new(cx);
-        Dialogs::new(cx);
+    create_vizia_editor(state, ViziaTheming::None, move |cx, _gui| {
+        build(cx, params.clone(), revision, meters.clone());
     })
+}
+
+/// The whole panel, into a context the editor or a test has set up.
+pub fn build(cx: &mut Context, params: Arc<Comp76Params>, revision: Revision, meters: Arc<Meters>) {
+    fonts::register_noto_sans(cx);
+    // The only styling the panel takes from a sheet rather than from its
+    // own drawing. See `style::STYLESHEET` for why it cannot be inline.
+    let _ = cx.add_stylesheet(STYLESHEET);
+
+    UiState::new(
+        params.editor_state.user_scale_factor(),
+        params.clone(),
+        revision,
+    )
+    .build(cx);
+
+    Header::new(cx);
+
+    VStack::new(cx, move |cx| {
+        faceplate(cx, revision, params.clone(), meters.clone());
+    })
+    .position_type(PositionType::Absolute)
+    .left(Pixels(0.0))
+    .top(Pixels(HEADER_H))
+    .width(Pixels(PANEL_W))
+    .height(Pixels(PANEL_H));
+
+    SettingsOverlay::new(cx);
+    Dialogs::new(cx);
 }
 
 fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, meters: Arc<Meters>) {
@@ -152,12 +140,12 @@ fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, me
         engraved(cx, ink, text, x, ROW + radius + 34.0, 11.0);
     }
 
-    Knob::new(cx, Panel::params, |p| &p.input, R_LARGE).place(INPUT_X, ROW, R_LARGE);
-    Knob::new(cx, Panel::params, |p| &p.output, R_LARGE).place(OUTPUT_X, ROW, R_LARGE);
+    Knob::new(cx, &params.input, R_LARGE).place(INPUT_X, ROW, R_LARGE);
+    Knob::new(cx, &params.output, R_LARGE).place(OUTPUT_X, ROW, R_LARGE);
     // The attack control carries the limiting switch at its anticlockwise end.
-    Knob::with_off_switch(cx, Panel::params, |p| &p.attack, |p| &p.limiting, R_SMALL)
+    Knob::with_off_switch(cx, &params.attack, &params.limiting, R_SMALL)
         .place(ATTACK_X, ROW, R_SMALL);
-    Knob::new(cx, Panel::params, |p| &p.release, R_SMALL).place(RELEASE_X, ROW, R_SMALL);
+    Knob::new(cx, &params.release, R_SMALL).place(RELEASE_X, ROW, R_SMALL);
 
     // The attack and release dials are marked slowest to fastest, which is the
     // opposite way round from most compressors. The attack dial's slow end is
@@ -195,13 +183,13 @@ fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, me
             .map(|(_, ptr)| *ptr)
             .collect();
         let button = match index {
-            0 => PushButton::new(cx, Panel::params, |p| &p.ratio_4, bank),
-            1 => PushButton::new(cx, Panel::params, |p| &p.ratio_8, bank),
-            2 => PushButton::new(cx, Panel::params, |p| &p.ratio_12, bank),
-            _ => PushButton::new(cx, Panel::params, |p| &p.ratio_20, bank),
+            0 => PushButton::new(cx, &params.ratio_4, bank),
+            1 => PushButton::new(cx, &params.ratio_8, bank),
+            2 => PushButton::new(cx, &params.ratio_12, bank),
+            _ => PushButton::new(cx, &params.ratio_20, bank),
         };
         button
-            .position_type(PositionType::SelfDirected)
+            .position_type(PositionType::Absolute)
             .left(Pixels(*x))
             .top(Pixels(ROW - RATIO_H / 2.0))
             .width(Pixels(RATIO_W))
@@ -226,7 +214,7 @@ fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, me
 
     // --- meter --------------------------------------------------------------
     VuMeter::new(cx, meters, params.clone())
-        .position_type(PositionType::SelfDirected)
+        .position_type(PositionType::Absolute)
         .left(Pixels(METER_X))
         .top(Pixels(METER_Y))
         .width(Pixels(METER_W))
@@ -234,8 +222,8 @@ fn faceplate(cx: &mut Context, revision: Revision, params: Arc<Comp76Params>, me
 
     let mode_labels = ["GR", "+4", "+8", "OFF"];
     for (index, x) in MODE_X.iter().enumerate() {
-        widgets::ModeButton::new(cx, Panel::params, |p| &p.meter, index, 4)
-            .position_type(PositionType::SelfDirected)
+        widgets::ModeButton::new(cx, &params.meter, index, 4)
+            .position_type(PositionType::Absolute)
             .left(Pixels(*x))
             .top(Pixels(MODE_Y))
             .width(Pixels(MODE_W))
@@ -275,7 +263,7 @@ pub trait Place {
 
 impl<V: View> Place for Handle<'_, V> {
     fn place(self, x: f32, y: f32, radius: f32) -> Self {
-        self.position_type(PositionType::SelfDirected)
+        self.position_type(PositionType::Absolute)
             .left(Pixels(x - radius))
             .top(Pixels(y - radius))
     }
@@ -303,18 +291,18 @@ fn plate(cx: &mut Context, ink: Ink, text: &str, x: f32, y: f32, size: f32) {
     let (rr, rg, rb, ra) = ink.relief;
     let (tr, tg, tb) = ink.text;
     for (dy, (r, g, b, a)) in [(1.0, (rr, rg, rb, ra)), (0.0, (tr, tg, tb, 255))] {
-        Label::new(cx, &spaced)
-            .position_type(PositionType::SelfDirected)
+        Label::new(cx, spaced.clone())
+            .position_type(PositionType::Absolute)
             .left(Pixels(x))
             .top(Pixels(y + dy - LABEL_H / 2.0))
             .width(Pixels(260.0))
             .height(Pixels(LABEL_H))
-            .child_top(Stretch(1.0))
-            .child_bottom(Stretch(1.0))
-            .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+            .alignment(Alignment::Left)
+            .font_family(noto_sans())
             .font_weight(FontWeightKeyword::Bold)
             .font_size(size)
-            .color(Color::rgba(r, g, b, a));
+            .color(Color::rgba(r, g, b, a))
+            .hoverable(false);
     }
 }
 
@@ -338,17 +326,15 @@ pub fn label_box(
     b: u8,
     a: u8,
 ) {
-    Label::new(cx, text)
-        .position_type(PositionType::SelfDirected)
+    Label::new(cx, text.to_owned())
+        .position_type(PositionType::Absolute)
         .left(Pixels(x - width / 2.0))
         .top(Pixels(y - LABEL_H / 2.0))
         .width(Pixels(width))
         .height(Pixels(LABEL_H))
-        .child_left(Stretch(1.0))
-        .child_right(Stretch(1.0))
-        .child_top(Stretch(1.0))
-        .child_bottom(Stretch(1.0))
-        .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+        .alignment(Alignment::Center)
+        .text_align(TextAlign::Center)
+        .font_family(noto_sans())
         .font_weight(FontWeightKeyword::Bold)
         .font_size(size)
         .color(Color::rgba(r, g, b, a))
@@ -359,4 +345,9 @@ pub fn label_box(
         // parents, never sideways to the control underneath. That is why the
         // oversampling switch could not be clicked at all.
         .hoverable(false);
+}
+
+/// The panel's typeface, as a view's font family.
+pub fn noto_sans() -> Vec<FamilyOwned> {
+    vec![FamilyOwned::Named(String::from(NOTO_SANS))]
 }

@@ -9,16 +9,16 @@
 // widgets are written throughout, including NIH-plug's own.
 #![allow(clippy::new_ret_no_self)]
 
-use nih_plug::prelude::{Param, ParamPtr, Params};
-use nih_plug_vizia::assets;
-use nih_plug_vizia::vizia::prelude::*;
-use nih_plug_vizia::vizia::vg;
-use nih_plug_vizia::widgets::RawParamEvent;
+use nice_plug::prelude::{Param, ParamPtr, Params};
+use vizia_plug::vizia::prelude::*;
+use vizia_plug::widgets::RawParamEvent;
 
+use super::paint::{self as vg, PanelCanvas};
 use super::style::*;
 use super::widgets::Knob;
-use super::{label_box, track_out, Panel, Place};
+use super::{label_box, noto_sans, track_out, Place};
 use crate::dsp::Revision;
+use crate::params::Comp76Params;
 use crate::presets::{self, Preset};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -35,21 +35,15 @@ const PANEL_HEIGHT: f32 = 196.0;
 const ROW_H: f32 = 24.0;
 
 /// Which drop down list, if any, is showing.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Menu {
     None,
     Scale,
     Preset,
 }
 
-impl Data for Menu {
-    fn same(&self, other: &Self) -> bool {
-        self == other
-    }
-}
-
 /// Which modal dialog, if any, is showing.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Dialog {
     None,
     /// Asking for a name to save under.
@@ -62,50 +56,38 @@ pub enum Dialog {
     Delete(String),
 }
 
-impl Data for Dialog {
-    fn same(&self, other: &Self) -> bool {
-        self == other
-    }
-}
-
-/// So the preset list can be bound to and rebuilt when it changes.
-impl Data for Preset {
-    fn same(&self, other: &Self) -> bool {
-        self == other
-    }
-}
-
-#[derive(Lens)]
+/// The panel's own state, as signals the views bind to: each one rebuilds
+/// or redraws only what shows it.
 pub struct UiState {
-    pub open: bool,
-    pub menu: Menu,
-    pub scale: f64,
-    pub dialog: Dialog,
+    pub open: Signal<bool>,
+    pub menu: Signal<Menu>,
+    /// The size the panel is shown at, as the menu offers it. Follows the
+    /// window rather than the menu: it changes when the host has actually
+    /// resized, and stays put when the host refuses.
+    pub scale: Signal<f64>,
+    pub dialog: Signal<Dialog>,
     /// Presets in the order the drop down shows them.
-    pub presets: Vec<Preset>,
+    pub presets: Signal<Vec<Preset>>,
     /// Name on the preset button.
-    pub current: String,
+    pub current: Signal<String>,
     /// Whether what is loaded is the factory preset of that name. A saved
     /// preset may share a name with a factory one, so the name alone does not
     /// say which row in the list is the one showing.
-    pub current_built_in: bool,
+    pub current_built_in: Signal<bool>,
     /// The values of the preset named above, kept so the panel can tell
     /// whether anything has been turned since it was loaded.
-    pub reference: BTreeMap<String, f32>,
+    pub reference: Signal<BTreeMap<String, f32>>,
     /// First row shown in the preset list. Only the rows that fit are built,
     /// so this is how the list is scrolled rather than an offset applied to
     /// something already laid out.
-    pub scroll: usize,
+    pub scroll: Signal<usize>,
     /// Contents of the name field in the save dialog.
-    pub name: String,
+    pub name: Signal<String>,
     /// What went wrong with the last save, if anything.
-    pub error: String,
-    pub params: Arc<crate::params::Comp76Params>,
+    pub error: Signal<String>,
+    pub params: Arc<Comp76Params>,
     /// Which revision this is, which decides the folder its presets live in.
     pub revision: Revision,
-    /// The door back to the host. Choosing a size has to ask it to resize the
-    /// window, and this is the only thing that can. See `editor::apply_scale`.
-    gui: Arc<dyn nih_plug::prelude::GuiContext>,
 }
 
 pub enum UiEvent {
@@ -131,12 +113,7 @@ pub enum UiEvent {
 }
 
 impl UiState {
-    pub fn new(
-        scale: f64,
-        params: Arc<crate::params::Comp76Params>,
-        revision: Revision,
-        gui: Arc<dyn nih_plug::prelude::GuiContext>,
-    ) -> Self {
+    pub fn new(scale: f64, params: Arc<Comp76Params>, revision: Revision) -> Self {
         let presets = presets::load_all(&params, &revision);
         // A reopened session remembers which preset it was set from, so pick
         // its values back up to compare against.
@@ -158,19 +135,18 @@ impl UiState {
         };
 
         Self {
-            open: false,
-            menu: Menu::None,
-            scale,
-            dialog: Dialog::None,
-            presets,
-            current,
-            current_built_in,
-            reference,
-            scroll: 0,
-            name: String::new(),
-            error: String::new(),
+            open: Signal::new(false),
+            menu: Signal::new(Menu::None),
+            scale: Signal::new(scale),
+            dialog: Signal::new(Dialog::None),
+            presets: Signal::new(presets),
+            current: Signal::new(current),
+            current_built_in: Signal::new(current_built_in),
+            reference: Signal::new(reference),
+            scroll: Signal::new(0),
+            name: Signal::new(String::new()),
+            error: Signal::new(String::new()),
             params,
-            gui,
             revision,
         }
     }
@@ -196,26 +172,27 @@ impl UiState {
     }
 
     fn store(&mut self, cx: &mut EventContext) {
-        let name = self.name.trim().to_string();
+        let name = self.name.get_untracked().trim().to_string();
         if name.is_empty() {
             return;
         }
         let preset = presets::capture(&self.params, &name);
         match presets::save(&preset, &self.revision) {
             Ok(_) => {
-                self.presets = presets::load_all(&self.params, &self.revision);
-                self.reference = preset.values.clone();
+                self.presets
+                    .set(presets::load_all(&self.params, &self.revision));
+                self.reference.set(preset.values.clone());
                 self.params.set_preset_name(&name);
-                self.current = name;
+                self.current.set(name);
                 // What is showing is now the file just written, not the
                 // factory preset that may share its name.
-                self.current_built_in = false;
-                self.dialog = Dialog::None;
-                self.error.clear();
+                self.current_built_in.set(false);
+                self.dialog.set(Dialog::None);
+                self.error.set(String::new());
             }
             Err(err) => {
-                self.error = err.to_string();
-                self.dialog = Dialog::Name;
+                self.error.set(err.to_string());
+                self.dialog.set(Dialog::Name);
             }
         }
         cx.needs_redraw();
@@ -224,43 +201,56 @@ impl UiState {
 
 impl Model for UiState {
     fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
-        event.map(|ui_event, meta| {
+        // The window has been resized to a new zoom, or kept at the old one
+        // by a host that refused. Either way this is the size it is now, and
+        // the one the session should reopen at.
+        event.map(|zoom: &vizia_plug::vizia::UserScaleChanged, _| {
+            let scale = zoom.0 / self.params.editor_state.base_scale_factor();
+            self.scale.set_if_changed(scale);
+            crate::editor::remember_scale(&self.params.editor_state, scale);
+        });
+
+        event.map(|ui_event: &UiEvent, meta| {
             match ui_event {
                 UiEvent::ToggleSettings => {
-                    self.open = !self.open;
-                    self.menu = Menu::None;
+                    self.open.set(!self.open.get_untracked());
+                    self.menu.set(Menu::None);
                 }
                 UiEvent::Close => {
-                    self.open = false;
-                    self.menu = Menu::None;
+                    self.open.set(false);
+                    self.menu.set(Menu::None);
                 }
                 UiEvent::ToggleScaleMenu => {
-                    self.menu = if self.menu == Menu::Scale {
+                    self.menu.set(if self.menu.get_untracked() == Menu::Scale {
                         Menu::None
                     } else {
                         Menu::Scale
-                    };
+                    });
                 }
                 UiEvent::TogglePresetMenu => {
-                    self.menu = if self.menu == Menu::Preset {
-                        Menu::None
+                    if self.menu.get_untracked() == Menu::Preset {
+                        self.menu.set(Menu::None);
                     } else {
-                        self.scroll = 0;
-                        Menu::Preset
-                    };
+                        self.scroll.set(0);
+                        self.menu.set(Menu::Preset);
+                    }
                 }
                 UiEvent::ScrollPresets(delta) => {
-                    let rows = preset_rows(self.presets.len());
+                    let rows = preset_rows(self.presets.with_untracked(Vec::len));
                     let most = rows.saturating_sub(MAX_PRESET_ROWS);
-                    let next = self.scroll as i64 + *delta as i64;
-                    self.scroll = next.clamp(0, most as i64) as usize;
+                    let next = self.scroll.get_untracked() as i64 + *delta as i64;
+                    self.scroll
+                        .set_if_changed(next.clamp(0, most as i64) as usize);
                 }
                 UiEvent::LoadPreset(index) => {
-                    self.menu = Menu::None;
-                    if let Some(preset) = self.presets.get(*index).cloned() {
-                        self.current = preset.name.clone();
-                        self.current_built_in = preset.built_in;
-                        self.reference = preset.values.clone();
+                    self.menu.set(Menu::None);
+                    let preset = self
+                        .presets
+                        .with_untracked(|presets| presets.get(*index).cloned());
+                    if let Some(preset) = preset {
+                        self.current.set(preset.name.clone());
+                        self.current_built_in.set(preset.built_in);
+                        self.reference.set(preset.values.clone());
                         self.params.set_preset_name(&preset.name);
                         self.apply(cx, &preset);
                     }
@@ -268,77 +258,90 @@ impl Model for UiState {
                 UiEvent::AskDelete(index) => {
                     // Deleting removes a file and there is no undo, so it goes
                     // through the same confirmation as replacing one.
-                    if let Some(preset) = self.presets.get(*index) {
+                    let preset = self
+                        .presets
+                        .with_untracked(|presets| presets.get(*index).cloned());
+                    if let Some(preset) = preset {
                         if !preset.built_in {
-                            self.dialog = Dialog::Delete(preset.name.clone());
-                            self.menu = Menu::None;
+                            self.dialog.set(Dialog::Delete(preset.name));
+                            self.menu.set(Menu::None);
                         }
                     }
                 }
                 UiEvent::DeletePreset(name) => {
-                    self.dialog = Dialog::None;
+                    self.dialog.set(Dialog::None);
                     let name = name.clone();
                     // Looked up by name, and refused for anything compiled in:
                     // a factory preset has no file, and the list would only
                     // put it straight back.
-                    let ours = self
-                        .presets
-                        .iter()
-                        .any(|preset| !preset.built_in && preset.name == name);
+                    let ours = self.presets.with_untracked(|presets| {
+                        presets
+                            .iter()
+                            .any(|preset| !preset.built_in && preset.name == name)
+                    });
                     if ours {
                         match presets::delete(&name, &self.revision) {
                             Ok(()) => {
-                                self.presets = presets::load_all(&*self.params, &self.revision);
+                                self.presets
+                                    .set(presets::load_all(&*self.params, &self.revision));
                                 // Nothing is loaded any more if what was
                                 // loaded has just been thrown away.
-                                if self.current == name {
-                                    self.current = String::from(NO_PRESET);
-                                    self.reference.clear();
+                                if self.current.get_untracked() == name {
+                                    self.current.set(String::from(NO_PRESET));
+                                    self.reference.set(BTreeMap::new());
                                     self.params.set_preset_name("");
                                 }
-                                self.error.clear();
+                                self.error.set(String::new());
                             }
-                            Err(err) => self.error = format!("could not delete: {err}"),
+                            Err(err) => self.error.set(format!("could not delete: {err}")),
                         }
                     }
                 }
                 UiEvent::OpenSaveDialog => {
                     // Offer the current preset's name so replacing one is easy.
-                    self.name = if self.current == NO_PRESET {
+                    let current = self.current.get_untracked();
+                    self.name.set(if current == NO_PRESET {
                         String::new()
                     } else {
-                        self.current.clone()
-                    };
-                    self.error.clear();
-                    self.dialog = Dialog::Name;
-                    self.menu = Menu::None;
-                    self.open = false;
+                        current
+                    });
+                    self.error.set(String::new());
+                    self.dialog.set(Dialog::Name);
+                    self.menu.set(Menu::None);
+                    self.open.set(false);
                 }
                 UiEvent::NameEdited(text) => {
-                    self.name = text.clone();
+                    self.name.set_if_changed(text.clone());
                 }
                 UiEvent::RequestSave => {
-                    let name = self.name.trim().to_string();
+                    let name = self.name.get_untracked().trim().to_string();
                     if name.is_empty() {
                         return;
                     }
-                    if presets::name_taken(&name, &self.presets) {
-                        self.dialog = Dialog::Overwrite;
+                    if self
+                        .presets
+                        .with_untracked(|presets| presets::name_taken(&name, presets))
+                    {
+                        self.dialog.set(Dialog::Overwrite);
                     } else {
                         self.store(cx);
                     }
                 }
                 UiEvent::ConfirmSave => self.store(cx),
                 UiEvent::CloseDialog => {
-                    self.dialog = Dialog::None;
-                    self.error.clear();
+                    self.dialog.set(Dialog::None);
+                    self.error.set(String::new());
                 }
                 UiEvent::SetScale(scale) => {
-                    self.menu = Menu::None;
-                    if crate::editor::apply_scale(&self.params.editor_state, &*self.gui, *scale) {
-                        self.scale = *scale;
-                        cx.set_user_scale_factor(*scale);
-                    }
+                    self.menu.set(Menu::None);
+                    // A request, not the change itself: the backend asks the
+                    // host for a window of the new size, and the panel takes
+                    // the zoom on when the window has actually changed --
+                    // `UserScaleChanged`, above. A host that refuses leaves
+                    // the panel, the menu and the saved size all as they were.
+                    cx.emit(WindowEvent::SetUserScale(
+                        *scale * self.params.editor_state.base_scale_factor(),
+                    ));
                 }
             }
             // The name box is the only thing in the panel that types, and it
@@ -346,10 +349,12 @@ impl Model for UiState {
             // what gets it the keyboard: a host's message loop sees every key
             // before the plugin, and some keep the letters for their own
             // shortcuts, so a box that took Delete and the arrows could not
-            // be typed into. See `vendor/baseview/src/win/text_input.rs`.
-            // Every other platform ignores it, and repeating an unchanged
-            // state does nothing, so it is simply kept in step here.
-            baseview::set_text_input(self.dialog == Dialog::Name);
+            // be typed into. See `vendor/baseview/PATCHES.md`. Every other
+            // platform ignores it, and repeating an unchanged state does
+            // nothing, so it is simply kept in step here.
+            cx.emit(vizia_plug::vizia::TextInputActive(
+                self.dialog.get_untracked() == Dialog::Name,
+            ));
             meta.consume();
         });
     }
@@ -366,49 +371,46 @@ impl Header {
         let handle = Self
             .build(cx, |cx| {
                 Label::new(cx, "Comp76Fx")
-                    .position_type(PositionType::SelfDirected)
+                    .position_type(PositionType::Absolute)
                     .left(Pixels(14.0))
                     .top(Pixels(0.0))
                     .height(Pixels(HEADER_H))
-                    .child_top(Stretch(1.0))
-                    .child_bottom(Stretch(1.0))
-                    .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+                    .alignment(Alignment::Left)
+                    .font_family(noto_sans())
                     .font_weight(FontWeightKeyword::Bold)
                     .font_size(11.0)
                     .color(Color::rgb(0xd6, 0xdc, 0xe2));
                 Label::new(cx, "peak limiter")
-                    .position_type(PositionType::SelfDirected)
+                    .position_type(PositionType::Absolute)
                     .left(Pixels(106.0))
                     .top(Pixels(0.0))
                     .height(Pixels(HEADER_H))
-                    .child_top(Stretch(1.0))
-                    .child_bottom(Stretch(1.0))
-                    .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+                    .alignment(Alignment::Left)
+                    .font_family(noto_sans())
                     .font_size(11.0)
                     .color(Color::rgb(0x6d, 0x7c, 0x88));
 
                 Label::new(cx, "PRESET")
-                    .position_type(PositionType::SelfDirected)
+                    .position_type(PositionType::Absolute)
                     .left(Pixels(300.0))
                     .top(Pixels(0.0))
                     .height(Pixels(HEADER_H))
-                    .child_top(Stretch(1.0))
-                    .child_bottom(Stretch(1.0))
-                    .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+                    .alignment(Alignment::Left)
+                    .font_family(noto_sans())
                     .font_size(10.0)
                     .color(Color::rgb(0x6d, 0x7c, 0x88));
                 PresetButton::new(cx);
 
                 SaveButton::new(cx)
-                    .position_type(PositionType::SelfDirected)
+                    .position_type(PositionType::Absolute)
                     .left(Pixels(PANEL_W - 58.0))
                     .top(Pixels((HEADER_H - 20.0) / 2.0));
                 GearButton::new(cx)
-                    .position_type(PositionType::SelfDirected)
+                    .position_type(PositionType::Absolute)
                     .left(Pixels(PANEL_W - 30.0))
                     .top(Pixels((HEADER_H - 20.0) / 2.0));
             })
-            .position_type(PositionType::SelfDirected)
+            .position_type(PositionType::Absolute)
             .left(Pixels(0.0))
             .top(Pixels(0.0))
             .width(Pixels(PANEL_W))
@@ -422,7 +424,7 @@ impl View for Header {
         Some("comp76-header")
     }
 
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         let mut bar = vg::Path::new();
         bar.rect(b.x, b.y, b.w, b.h);
@@ -456,7 +458,7 @@ impl View for GearButton {
         Some("comp76-gear")
     }
 
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         let (mx, my) = (b.x + b.w / 2.0, b.y + b.h / 2.0);
         let r = b.w.min(b.h) * 0.40;
@@ -500,27 +502,31 @@ pub struct SettingsOverlay;
 
 impl SettingsOverlay {
     pub fn new(cx: &mut Context) {
-        Binding::new(cx, UiState::open, |cx, open| {
-            if !open.get(cx) {
+        let ui = cx.data::<UiState>();
+        let (open, menu, presets, scroll) = (ui.open, ui.menu, ui.presets, ui.scroll);
+        let params = ui.params.clone();
+        Binding::new(cx, open, move |cx| {
+            if !open.get() {
                 return;
             }
             // Clicking anywhere else puts the panel away.
             Dismiss::new(cx, true);
-            Backdrop::new(cx, |cx| {
+            let params = params.clone();
+            Backdrop::new(cx, move |cx| {
                 heading(cx, "SETTINGS", 18.0, 14.0);
 
                 setting_label(cx, "WINDOW SIZE", 48.0);
                 ScaleButton::new(cx);
 
                 setting_label(cx, "OVERSAMPLING", 84.0);
-                oversampling_row(cx, 152.0, 76.0);
+                oversampling_row(cx, &params, 152.0, 76.0);
 
                 // The knob is the circuit's share of the output, so it is
                 // marked at its ends like the panel's dials. It was labelled
                 // DRY BLEND, which read as the amount of dry signal: turned
                 // fully up for "all of it", it gave the opposite.
                 setting_label(cx, "MIX", 124.0);
-                Knob::new(cx, Panel::params, |p| &p.mix, 18.0).place(262.0, 152.0, 18.0);
+                Knob::new(cx, &params.mix, 18.0).place(262.0, 152.0, 18.0);
                 caption(cx, "DRY", 262.0 - 24.0, 180.0);
                 caption(cx, "WET", 262.0 + 24.0, 180.0);
             });
@@ -528,15 +534,18 @@ impl SettingsOverlay {
         });
         // The preset list belongs to the header, so it shows whether or not
         // the settings panel is open.
-        Binding::new(cx, UiState::menu, |cx, menu| {
-            if menu.get(cx) == Menu::Preset {
+        Binding::new(cx, menu, move |cx| {
+            if menu.get() == Menu::Preset {
                 // Clicking anywhere else puts the list away again.
                 Dismiss::new(cx, false);
                 // Rebuilt whenever the presets change, so deleting one takes
                 // its row out from under the pointer instead of leaving a
-                // stale list whose indices no longer line up.
-                Binding::new(cx, UiState::presets, |cx, _| {
-                    PresetMenu::new(cx);
+                // stale list whose indices no longer line up -- and whenever
+                // it scrolls, since scrolling is building different rows.
+                Binding::new(cx, presets, move |cx| {
+                    Binding::new(cx, scroll, |cx| {
+                        PresetMenu::new(cx);
+                    });
                 });
             }
         });
@@ -554,7 +563,7 @@ impl Dismiss {
     fn new(cx: &mut Context, shaded: bool) -> Handle<'_, Self> {
         Self { shaded }
             .build(cx, |_| {})
-            .position_type(PositionType::SelfDirected)
+            .position_type(PositionType::Absolute)
             .left(Pixels(0.0))
             .top(Pixels(0.0))
             .width(Pixels(PANEL_W))
@@ -563,7 +572,7 @@ impl Dismiss {
 }
 
 impl View for Dismiss {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         if !self.shaded {
             return;
         }
@@ -590,7 +599,7 @@ struct Backdrop;
 impl Backdrop {
     fn new(cx: &mut Context, content: impl FnOnce(&mut Context)) -> Handle<'_, Self> {
         Self.build(cx, |cx| content(cx))
-            .position_type(PositionType::SelfDirected)
+            .position_type(PositionType::Absolute)
             .left(Pixels(PANEL_X))
             .top(Pixels(PANEL_Y))
             .width(Pixels(PANEL_WIDTH))
@@ -599,12 +608,12 @@ impl Backdrop {
 }
 
 impl View for Backdrop {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         card(canvas, cx.bounds(), cx.scale_factor());
     }
 }
 
-fn card(canvas: &mut Canvas, b: BoundingBox, scale: f32) {
+fn card(canvas: &Canvas, b: BoundingBox, scale: f32) {
     let mut shadow = vg::Path::new();
     shadow.rounded_rect(b.x - 6.0, b.y - 2.0, b.w + 12.0, b.h + 14.0, 12.0 * scale);
     canvas.fill_path(&shadow, &vg::Paint::color(rgba(0x000000, 0.35)));
@@ -622,28 +631,26 @@ fn card(canvas: &mut Canvas, b: BoundingBox, scale: f32) {
 }
 
 fn heading(cx: &mut Context, text: &str, y: f32, x: f32) {
-    Label::new(cx, &track_out(text))
-        .position_type(PositionType::SelfDirected)
+    Label::new(cx, track_out(text))
+        .position_type(PositionType::Absolute)
         .left(Pixels(x))
         .top(Pixels(y - 9.0))
         .height(Pixels(18.0))
-        .child_top(Stretch(1.0))
-        .child_bottom(Stretch(1.0))
-        .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+        .alignment(Alignment::Left)
+        .font_family(noto_sans())
         .font_weight(FontWeightKeyword::Bold)
         .font_size(10.0)
         .color(Color::rgb(0x8e, 0x9c, 0xa8));
 }
 
 fn setting_label(cx: &mut Context, text: &str, y: f32) {
-    Label::new(cx, text)
-        .position_type(PositionType::SelfDirected)
+    Label::new(cx, text.to_owned())
+        .position_type(PositionType::Absolute)
         .left(Pixels(14.0))
         .top(Pixels(y - 9.0))
         .height(Pixels(18.0))
-        .child_top(Stretch(1.0))
-        .child_bottom(Stretch(1.0))
-        .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+        .alignment(Alignment::Left)
+        .font_family(noto_sans())
         .font_size(11.5)
         .color(Color::rgb(0xd2, 0xd8, 0xde));
 }
@@ -665,19 +672,19 @@ struct ScaleButton;
 
 impl ScaleButton {
     fn new(cx: &mut Context) -> Handle<'_, Self> {
-        Self.build(cx, |cx| {
-            Label::new(cx, UiState::scale.map(|s| scale_text(*s)))
-                .position_type(PositionType::SelfDirected)
+        let scale = cx.data::<UiState>().scale;
+        Self.build(cx, move |cx| {
+            Label::new(cx, scale.map(|s| scale_text(*s)))
+                .position_type(PositionType::Absolute)
                 .left(Pixels(10.0))
                 .top(Pixels(0.0))
                 .height(Pixels(ROW_H))
-                .child_top(Stretch(1.0))
-                .child_bottom(Stretch(1.0))
-                .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+                .alignment(Alignment::Left)
+                .font_family(noto_sans())
                 .font_size(11.5)
                 .color(Color::rgb(0xf0, 0xf3, 0xf6));
         })
-        .position_type(PositionType::SelfDirected)
+        .position_type(PositionType::Absolute)
         .left(Pixels(PANEL_WIDTH - 116.0))
         .top(Pixels(48.0 - ROW_H / 2.0))
         .width(Pixels(102.0))
@@ -686,7 +693,7 @@ impl ScaleButton {
 }
 
 impl View for ScaleButton {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         field(canvas, b, cx.scale_factor());
         caret(
@@ -728,8 +735,9 @@ struct ScaleMenu;
 
 impl ScaleMenu {
     fn new(cx: &mut Context) {
-        Binding::new(cx, UiState::menu, |cx, menu| {
-            if menu.get(cx) == Menu::Scale {
+        let menu = cx.data::<UiState>().menu;
+        Binding::new(cx, menu, move |cx| {
+            if menu.get() == Menu::Scale {
                 MenuBackdrop::new(cx);
             }
         });
@@ -745,7 +753,7 @@ impl MenuBackdrop {
                 MenuItem::new(cx, scale, i);
             }
         })
-        .position_type(PositionType::SelfDirected)
+        .position_type(PositionType::Absolute)
         .left(Pixels(PANEL_X + PANEL_WIDTH - 116.0))
         .top(Pixels(menu_top()))
         .width(Pixels(102.0))
@@ -754,31 +762,33 @@ impl MenuBackdrop {
 }
 
 impl View for MenuBackdrop {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         card(canvas, cx.bounds(), cx.scale_factor());
     }
 }
 
 struct MenuItem {
     scale: f64,
+    /// The size the panel is at now, which gets the highlight.
+    current: Signal<f64>,
 }
 
 impl MenuItem {
     fn new(cx: &mut Context, scale: f64, index: usize) -> Handle<'_, Self> {
-        Self { scale }
+        let current = cx.data::<UiState>().scale;
+        Self { scale, current }
             .build(cx, move |cx| {
-                Label::new(cx, &scale_text(scale))
-                    .position_type(PositionType::SelfDirected)
+                Label::new(cx, scale_text(scale))
+                    .position_type(PositionType::Absolute)
                     .left(Pixels(10.0))
                     .top(Pixels(0.0))
                     .height(Pixels(ROW_H))
-                    .child_top(Stretch(1.0))
-                    .child_bottom(Stretch(1.0))
-                    .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+                    .alignment(Alignment::Left)
+                    .font_family(noto_sans())
                     .font_size(11.5)
                     .color(Color::rgb(0xe4, 0xea, 0xf0));
             })
-            .position_type(PositionType::SelfDirected)
+            .position_type(PositionType::Absolute)
             .left(Pixels(1.0))
             .top(Pixels(4.0 + index as f32 * ROW_H))
             .width(Pixels(100.0))
@@ -787,8 +797,8 @@ impl MenuItem {
 }
 
 impl View for MenuItem {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
-        if (UiState::scale.get(cx) - self.scale).abs() < 1e-6 {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
+        if (self.current.get_untracked() - self.scale).abs() < 1e-6 {
             let b = cx.bounds();
             let mut row = vg::Path::new();
             row.rounded_rect(b.x + 2.0, b.y + 1.0, b.w - 4.0, b.h - 2.0, 3.0);
@@ -812,10 +822,10 @@ impl View for MenuItem {
 // ---------------------------------------------------------------------------
 
 /// A segmented row, one segment per oversampling factor.
-fn oversampling_row(cx: &mut Context, width: f32, y: f32) {
-    let ptr = Panel::params.get(cx).oversampling.as_ptr();
-    Segments::new(cx)
-        .position_type(PositionType::SelfDirected)
+fn oversampling_row(cx: &mut Context, params: &Comp76Params, width: f32, y: f32) {
+    let ptr = params.oversampling.as_ptr();
+    Segments::new(cx, &params.oversampling)
+        .position_type(PositionType::Absolute)
         .left(Pixels(PANEL_WIDTH - 14.0 - width))
         .top(Pixels(y + 8.0 - ROW_H / 2.0))
         .width(Pixels(width))
@@ -823,7 +833,7 @@ fn oversampling_row(cx: &mut Context, width: f32, y: f32) {
     let seg = width / OVERSAMPLING.len() as f32;
     for (i, text) in OVERSAMPLING.iter().enumerate() {
         SegmentHit::new(cx, ptr, i)
-            .position_type(PositionType::SelfDirected)
+            .position_type(PositionType::Absolute)
             .left(Pixels(PANEL_WIDTH - 14.0 - width + i as f32 * seg))
             .top(Pixels(y + 8.0 - ROW_H / 2.0))
             .width(Pixels(seg))
@@ -845,24 +855,20 @@ fn oversampling_row(cx: &mut Context, width: f32, y: f32) {
 
 /// Draws the segmented control and marks the selected factor.
 struct Segments {
-    param: nih_plug_vizia::widgets::param_base::ParamWidgetBase,
+    param: vizia_plug::widgets::param_base::ParamWidgetBase,
 }
 
 impl Segments {
-    fn new(cx: &mut Context) -> Handle<'_, Self> {
+    fn new<'a, P: Param + 'static>(cx: &'a mut Context, param: &P) -> Handle<'a, Self> {
         Self {
-            param: nih_plug_vizia::widgets::param_base::ParamWidgetBase::new(
-                cx,
-                Panel::params,
-                |p| &p.oversampling,
-            ),
+            param: vizia_plug::widgets::param_base::ParamWidgetBase::new(cx, param),
         }
         .build(cx, |_| {})
     }
 }
 
 impl View for Segments {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         let scale = cx.scale_factor();
         field(canvas, b, scale);
@@ -922,7 +928,7 @@ impl View for SegmentHit {
 // Shared chrome
 // ---------------------------------------------------------------------------
 
-fn field(canvas: &mut Canvas, b: BoundingBox, scale: f32) {
+fn field(canvas: &Canvas, b: BoundingBox, scale: f32) {
     let mut path = vg::Path::new();
     path.rounded_rect(b.x, b.y, b.w, b.h, 4.0 * scale);
     canvas.fill_path(&path, &vg::Paint::color(rgb(0x111519)));
@@ -932,7 +938,7 @@ fn field(canvas: &mut Canvas, b: BoundingBox, scale: f32) {
     );
 }
 
-fn caret(canvas: &mut Canvas, x: f32, y: f32, scale: f32) {
+fn caret(canvas: &Canvas, x: f32, y: f32, scale: f32) {
     let s = 3.5 * scale;
     let mut path = vg::Path::new();
     path.move_to(x - s, y - s * 0.5);
@@ -954,39 +960,50 @@ const PRESET_W: f32 = 300.0;
 pub const NO_PRESET: &str = "\u{2014}";
 
 /// The button in the header showing the loaded preset.
-struct PresetButton;
+struct PresetButton {
+    /// What the marker compares the panel against; see `modified`.
+    reference: Signal<BTreeMap<String, f32>>,
+    params: Arc<Comp76Params>,
+}
 
 impl PresetButton {
     fn new(cx: &mut Context) -> Handle<'_, Self> {
-        Self.build(cx, |cx| {
-            Label::new(cx, UiState::current)
-                .position_type(PositionType::SelfDirected)
-                .left(Pixels(10.0))
-                .top(Pixels(0.0))
-                .width(Pixels(PRESET_W - 32.0))
-                .height(Pixels(ROW_H))
-                .child_top(Stretch(1.0))
-                .child_bottom(Stretch(1.0))
-                .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
-                .font_size(11.5)
-                .color(Color::rgb(0xf0, 0xf3, 0xf6));
-        })
-        .position_type(PositionType::SelfDirected)
-        .left(Pixels(PRESET_X))
-        .top(Pixels((HEADER_H - ROW_H) / 2.0))
-        .width(Pixels(PRESET_W))
-        .height(Pixels(ROW_H))
+        let ui = cx.data::<UiState>();
+        let (current, reference) = (ui.current, ui.reference);
+        let params = ui.params.clone();
+        Self { reference, params }
+            .build(cx, move |cx| {
+                // Loading or saving a preset changes what the marker compares
+                // against without any parameter event saying so.
+                let button = cx.current();
+                Binding::new(cx, reference, move |cx| cx.needs_redraw(button));
+                Label::new(cx, current)
+                    .position_type(PositionType::Absolute)
+                    .left(Pixels(10.0))
+                    .top(Pixels(0.0))
+                    .width(Pixels(PRESET_W - 32.0))
+                    .height(Pixels(ROW_H))
+                    .alignment(Alignment::Left)
+                    .font_family(noto_sans())
+                    .font_size(11.5)
+                    .color(Color::rgb(0xf0, 0xf3, 0xf6));
+            })
+            .position_type(PositionType::Absolute)
+            .left(Pixels(PRESET_X))
+            .top(Pixels((HEADER_H - ROW_H) / 2.0))
+            .width(Pixels(PRESET_W))
+            .height(Pixels(ROW_H))
     }
 }
 
 impl View for PresetButton {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         let scale = cx.scale_factor();
         field(canvas, b, scale);
 
         // A dot while the panel no longer matches the preset it was set from.
-        if panel_modified(cx) {
+        if self.modified() {
             let mut dot = vg::Path::new();
             dot.circle(b.x + b.w - 30.0 * scale, b.y + b.h / 2.0, 3.2 * scale);
             canvas.fill_path(&dot, &vg::Paint::color(rgb(0xe0a343)));
@@ -1011,13 +1028,14 @@ impl View for PresetButton {
     }
 }
 
-/// Whether anything has been turned since the preset was loaded. Compared
-/// against the values rather than tracked as a flag, so turning a control back
-/// to where it was clears the marker again.
-fn panel_modified(cx: &mut DrawContext) -> bool {
-    let reference = UiState::reference.get(cx);
-    let params = UiState::params.get(cx);
-    !presets::matches(&params, &reference)
+impl PresetButton {
+    /// Whether anything has been turned since the preset was loaded. Compared
+    /// against the values rather than tracked as a flag, so turning a control
+    /// back to where it was clears the marker again.
+    fn modified(&self) -> bool {
+        self.reference
+            .with_untracked(|reference| !presets::matches(&self.params, reference))
+    }
 }
 
 /// How tall the preset list may get before it starts another column, in rows.
@@ -1060,12 +1078,22 @@ struct PresetMenu;
 
 impl PresetMenu {
     fn new(cx: &mut Context) -> Handle<'_, Self> {
-        let names: Vec<(String, bool)> = UiState::presets
-            .get(cx)
-            .iter()
-            .map(|preset| (preset.name.clone(), preset.built_in))
-            .collect();
-        let scroll = UiState::scroll.get(cx);
+        let ui = cx.data::<UiState>();
+        // Which row is the one loaded. Decided here rather than when each row
+        // draws: the list is rebuilt whenever that can change, since loading
+        // a preset closes it and saving or deleting one rebuilds it.
+        let current = ui.current.get_untracked();
+        let current_built_in = ui.current_built_in.get_untracked();
+        let names: Vec<(String, bool, bool)> = ui.presets.with_untracked(|presets| {
+            presets
+                .iter()
+                .map(|preset| {
+                    let loaded = preset.name == current && preset.built_in == current_built_in;
+                    (preset.name.clone(), preset.built_in, loaded)
+                })
+                .collect()
+        });
+        let scroll = ui.scroll.get_untracked();
 
         let count = names.len();
         let columns = preset_columns(count);
@@ -1097,10 +1125,10 @@ impl PresetMenu {
                         continue;
                     }
                     let index = column * rows + scroll + row;
-                    let Some((name, built_in)) = names.get(index) else {
+                    let Some((name, built_in, loaded)) = names.get(index) else {
                         continue;
                     };
-                    PresetItem::new(cx, name, *built_in, index)
+                    PresetItem::new(cx, name, *built_in, *loaded, index)
                         .left(Pixels(1.0 + column as f32 * PRESET_W))
                         .top(Pixels(4.0 + row as f32 * ROW_H));
                 }
@@ -1108,14 +1136,14 @@ impl PresetMenu {
 
             if scrolls {
                 PresetScrollBar::new(cx, scroll, rows, visible)
-                    .position_type(PositionType::SelfDirected)
+                    .position_type(PositionType::Absolute)
                     .left(Pixels(width - GUTTER - 2.0))
                     .top(Pixels(4.0))
                     .width(Pixels(GUTTER))
                     .height(Pixels(visible as f32 * ROW_H));
             }
         })
-        .position_type(PositionType::SelfDirected)
+        .position_type(PositionType::Absolute)
         // Kept inside the window: with enough columns the natural left edge
         // would push the last one off the right hand side.
         .left(Pixels(PRESET_X.min(PANEL_W - width - 8.0).max(8.0)))
@@ -1126,7 +1154,7 @@ impl PresetMenu {
 }
 
 impl View for PresetMenu {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         card(canvas, cx.bounds(), cx.scale_factor());
     }
 
@@ -1166,7 +1194,7 @@ impl PresetScrollBar {
 }
 
 impl View for PresetScrollBar {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         let scale = cx.scale_factor();
         let rows = self.rows.max(1) as f32;
@@ -1197,22 +1225,29 @@ impl View for PresetScrollBar {
 
 struct PresetItem {
     index: usize,
+    /// Whether this is the preset loaded now, which gets the highlight.
+    loaded: bool,
 }
 
 impl PresetItem {
-    fn new<'a>(cx: &'a mut Context, name: &str, built_in: bool, index: usize) -> Handle<'a, Self> {
+    fn new<'a>(
+        cx: &'a mut Context,
+        name: &str,
+        built_in: bool,
+        loaded: bool,
+        index: usize,
+    ) -> Handle<'a, Self> {
         let text = name.to_string();
-        Self { index }
+        Self { index, loaded }
             .build(cx, move |cx| {
-                Label::new(cx, &text)
-                    .position_type(PositionType::SelfDirected)
+                Label::new(cx, text.clone())
+                    .position_type(PositionType::Absolute)
                     .left(Pixels(10.0))
                     .top(Pixels(0.0))
                     .width(Pixels(PRESET_W - 60.0))
                     .height(Pixels(ROW_H))
-                    .child_top(Stretch(1.0))
-                    .child_bottom(Stretch(1.0))
-                    .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+                    .alignment(Alignment::Left)
+                    .font_family(noto_sans())
                     .font_size(11.5)
                     .color(Color::rgb(0xe4, 0xea, 0xf0));
                 if built_in {
@@ -1232,7 +1267,7 @@ impl PresetItem {
                     DeleteButton::new(cx, index);
                 }
             })
-            .position_type(PositionType::SelfDirected)
+            .position_type(PositionType::Absolute)
             .left(Pixels(1.0))
             .top(Pixels(4.0 + index as f32 * ROW_H))
             .width(Pixels(PRESET_W - 2.0))
@@ -1255,7 +1290,7 @@ impl DeleteButton {
     fn new(cx: &mut Context, index: usize) -> Handle<'_, Self> {
         Self { index, hot: false }
             .build(cx, |_| {})
-            .position_type(PositionType::SelfDirected)
+            .position_type(PositionType::Absolute)
             .left(Pixels(PRESET_W - 30.0))
             .top(Pixels((ROW_H - 16.0) / 2.0))
             .width(Pixels(16.0))
@@ -1268,7 +1303,7 @@ impl View for DeleteButton {
         Some("preset-delete")
     }
 
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         let scale = cx.scale_factor();
         let hot = self.hot;
@@ -1322,16 +1357,8 @@ impl View for DeleteButton {
 }
 
 impl View for PresetItem {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
-        let selected = UiState::presets
-            .get(cx)
-            .get(self.index)
-            .map(|preset| {
-                preset.name == UiState::current.get(cx)
-                    && preset.built_in == UiState::current_built_in.get(cx)
-            })
-            .unwrap_or(false);
-        if selected {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
+        if self.loaded {
             let b = cx.bounds();
             let mut row = vg::Path::new();
             row.rounded_rect(b.x + 2.0, b.y + 1.0, b.w - 4.0, b.h - 2.0, 3.0);
@@ -1362,7 +1389,7 @@ impl SaveButton {
 }
 
 impl View for SaveButton {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         // A floppy disk, which is still what "save" looks like.
         let b = cx.bounds();
         let s = b.w.min(b.h) * 0.78;
@@ -1406,7 +1433,9 @@ pub struct Dialogs;
 
 impl Dialogs {
     pub fn new(cx: &mut Context) {
-        Binding::new(cx, UiState::dialog, |cx, dialog| match dialog.get(cx) {
+        let ui = cx.data::<UiState>();
+        let (dialog, name, error) = (ui.dialog, ui.name, ui.error);
+        Binding::new(cx, dialog, move |cx| match dialog.get() {
             Dialog::None => {}
             Dialog::Name => {
                 Shade::new(cx);
@@ -1414,20 +1443,19 @@ impl Dialogs {
                     dialog_title(cx, "SAVE PRESET");
                     dialog_text(cx, "Name this preset.", 50.0);
 
-                    let field = Textbox::new(cx, UiState::name)
-                        .position_type(PositionType::SelfDirected)
+                    Textbox::new(cx, name)
+                        .position_type(PositionType::Absolute)
                         .left(Pixels(20.0))
                         .top(Pixels(70.0))
                         .width(Pixels(DIALOG_W - 40.0))
                         .height(Pixels(28.0))
-                        .child_left(Pixels(9.0))
-                        .child_top(Stretch(1.0))
-                        .child_bottom(Stretch(1.0))
+                        .padding_left(Pixels(9.0))
+                        .alignment(Alignment::Left)
                         .background_color(Color::rgb(0x11, 0x15, 0x19))
                         .border_color(Color::rgb(0x44, 0x4e, 0x57))
                         .border_width(Pixels(1.0))
-                        .border_radius(Pixels(4.0))
-                        .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+                        .corner_radius(Pixels(4.0))
+                        .font_family(noto_sans())
                         .font_size(12.0)
                         // The caret and selection colours are in
                         // `style::STYLESHEET`: set here, the caret never blinks.
@@ -1443,12 +1471,13 @@ impl Dialogs {
                                 cx.emit(UiEvent::RequestSave);
                             }
                         })
-                        .entity();
-                    // Ready to type as soon as the dialog appears.
-                    cx.emit_to(field, TextEvent::StartEdit);
+                        // Ready to type as soon as the dialog appears. A
+                        // vizia textbox only shows its caret and takes keys in
+                        // edit mode, which it enters on gaining focus.
+                        .on_build(|cx| cx.focus());
 
-                    Binding::new(cx, UiState::error, |cx, error| {
-                        let error = error.get(cx);
+                    Binding::new(cx, error, move |cx| {
+                        let error = error.get();
                         if !error.is_empty() {
                             label_box(
                                 cx,
@@ -1477,9 +1506,9 @@ impl Dialogs {
                 Shade::new(cx);
                 DialogCard::new(cx, |cx| {
                     dialog_title(cx, "REPLACE PRESET");
-                    Binding::new(cx, UiState::name, |cx, name| {
+                    Binding::new(cx, name, move |cx| {
                         let message =
-                            format!("\u{201c}{}\u{201d} already exists.", name.get(cx).trim());
+                            format!("\u{201c}{}\u{201d} already exists.", name.get().trim());
                         dialog_text(cx, &message, 58.0);
                     });
                     dialog_text(cx, "Saving will replace it.", 80.0);
@@ -1522,7 +1551,7 @@ struct Shade;
 impl Shade {
     fn new(cx: &mut Context) -> Handle<'_, Self> {
         Self.build(cx, |_| {})
-            .position_type(PositionType::SelfDirected)
+            .position_type(PositionType::Absolute)
             .left(Pixels(0.0))
             .top(Pixels(0.0))
             .width(Pixels(PANEL_W))
@@ -1531,7 +1560,7 @@ impl Shade {
 }
 
 impl View for Shade {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         let mut sheet = vg::Path::new();
         sheet.rect(b.x, b.y, b.w, b.h);
@@ -1554,7 +1583,7 @@ struct DialogCard;
 impl DialogCard {
     fn new(cx: &mut Context, content: impl FnOnce(&mut Context)) -> Handle<'_, Self> {
         Self.build(cx, |cx| content(cx))
-            .position_type(PositionType::SelfDirected)
+            .position_type(PositionType::Absolute)
             .left(Pixels(DIALOG_X))
             .top(Pixels(DIALOG_Y))
             .width(Pixels(DIALOG_W))
@@ -1563,7 +1592,7 @@ impl DialogCard {
 }
 
 impl View for DialogCard {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         card(canvas, cx.bounds(), cx.scale_factor());
     }
 
@@ -1578,29 +1607,27 @@ impl View for DialogCard {
 }
 
 fn dialog_title(cx: &mut Context, text: &str) {
-    Label::new(cx, &track_out(text))
-        .position_type(PositionType::SelfDirected)
+    Label::new(cx, track_out(text))
+        .position_type(PositionType::Absolute)
         .left(Pixels(20.0))
         .top(Pixels(12.0))
         .height(Pixels(20.0))
-        .child_top(Stretch(1.0))
-        .child_bottom(Stretch(1.0))
-        .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+        .alignment(Alignment::Left)
+        .font_family(noto_sans())
         .font_weight(FontWeightKeyword::Bold)
         .font_size(11.0)
         .color(Color::rgb(0x8e, 0x9c, 0xa8));
 }
 
 fn dialog_text(cx: &mut Context, text: &str, y: f32) {
-    Label::new(cx, text)
-        .position_type(PositionType::SelfDirected)
+    Label::new(cx, text.to_owned())
+        .position_type(PositionType::Absolute)
         .left(Pixels(20.0))
         .top(Pixels(y - 9.0))
         .width(Pixels(DIALOG_W - 40.0))
         .height(Pixels(18.0))
-        .child_top(Stretch(1.0))
-        .child_bottom(Stretch(1.0))
-        .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+        .alignment(Alignment::Left)
+        .font_family(noto_sans())
         .font_size(11.5)
         .color(Color::rgb(0xd2, 0xd8, 0xde));
 }
@@ -1624,29 +1651,27 @@ impl DialogButton {
             accent,
         }
         .build(cx, move |cx| {
-            Label::new(cx, &text)
-                .position_type(PositionType::SelfDirected)
+            Label::new(cx, text.clone())
+                .position_type(PositionType::Absolute)
                 .left(Pixels(0.0))
                 .top(Pixels(0.0))
                 .width(Pixels(88.0))
                 .height(Pixels(28.0))
-                .child_left(Stretch(1.0))
-                .child_right(Stretch(1.0))
-                .child_top(Stretch(1.0))
-                .child_bottom(Stretch(1.0))
-                .font_family(vec![FamilyOwned::Name(String::from(assets::NOTO_SANS))])
+                .alignment(Alignment::Center)
+                .text_align(TextAlign::Center)
+                .font_family(noto_sans())
                 .font_weight(FontWeightKeyword::Bold)
                 .font_size(10.5)
                 .color(Color::rgb(0xf2, 0xf5, 0xf8));
         })
-        .position_type(PositionType::SelfDirected)
+        .position_type(PositionType::Absolute)
         .width(Pixels(88.0))
         .height(Pixels(28.0))
     }
 }
 
 impl View for DialogButton {
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         let scale = cx.scale_factor();
         let mut path = vg::Path::new();

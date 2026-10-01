@@ -5,7 +5,7 @@
 //! [`export_revision!`] macro, so there is one implementation rather than
 //! three copies that drift apart.
 
-use nih_plug::prelude::*;
+use nice_plug::prelude::*;
 use std::sync::Arc;
 
 use crate::dsp::{Channel, Controls, Delay, Revision};
@@ -119,7 +119,7 @@ impl Comp76 {
         self.meters.clone()
     }
 
-    pub fn initialize(&mut self, channels: usize, sample_rate: f32) {
+    pub fn activate(&mut self, channels: usize, sample_rate: f32) {
         self.sample_rate = sample_rate;
         self.oversampling = self.params.oversampling.value();
         self.strips = (0..channels)
@@ -202,12 +202,17 @@ impl Comp76 {
 ///
 /// Each revision crate is only its identity: a name, the identifiers a host
 /// uses to tell plugins apart, and the circuit differences.
+///
+/// `au2_subtype` is the Audio Unit's FourCC under the BurningTreeC
+/// manufacturer code. Like the CLAP and VST3 identifiers, it is how a host
+/// finds the plugin in a saved project, so it never changes once shipped.
 #[macro_export]
 macro_rules! export_revision {
     (
         name: $name:literal,
         clap_id: $clap_id:literal,
         vst3_id: $vst3_id:literal,
+        au2_subtype: $au2_subtype:literal,
         description: $description:literal,
         revision: $revision:expr $(,)?
     ) => {
@@ -226,23 +231,23 @@ macro_rules! export_revision {
             }
         }
 
-        impl ::nih_plug::prelude::Plugin for Plugin76 {
+        impl ::nice_plug::prelude::Plugin for Plugin76 {
             const NAME: &'static str = $name;
             const VENDOR: &'static str = "BurningTreeC";
             const URL: &'static str = "https://github.com/BurningTreeC/comp76fx";
             const EMAIL: &'static str = "huber.simon@protonmail.com";
             const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-            const AUDIO_IO_LAYOUTS: &'static [::nih_plug::prelude::AudioIOLayout] = &[
-                ::nih_plug::prelude::AudioIOLayout {
-                    main_input_channels: ::nih_plug::prelude::NonZeroU32::new(2),
-                    main_output_channels: ::nih_plug::prelude::NonZeroU32::new(2),
-                    ..::nih_plug::prelude::AudioIOLayout::const_default()
+            const AUDIO_IO_LAYOUTS: &'static [::nice_plug::prelude::AudioIOLayout] = &[
+                ::nice_plug::prelude::AudioIOLayout {
+                    main_input_channels: ::nice_plug::prelude::NonZeroU32::new(2),
+                    main_output_channels: ::nice_plug::prelude::NonZeroU32::new(2),
+                    ..::nice_plug::prelude::AudioIOLayout::const_default()
                 },
-                ::nih_plug::prelude::AudioIOLayout {
-                    main_input_channels: ::nih_plug::prelude::NonZeroU32::new(1),
-                    main_output_channels: ::nih_plug::prelude::NonZeroU32::new(1),
-                    ..::nih_plug::prelude::AudioIOLayout::const_default()
+                ::nice_plug::prelude::AudioIOLayout {
+                    main_input_channels: ::nice_plug::prelude::NonZeroU32::new(1),
+                    main_output_channels: ::nice_plug::prelude::NonZeroU32::new(1),
+                    ..::nice_plug::prelude::AudioIOLayout::const_default()
                 },
             ];
 
@@ -250,15 +255,16 @@ macro_rules! export_revision {
 
             type SysExMessage = ();
             type BackgroundTask = ();
+            type Editor = $crate::editor::Editor;
 
-            fn params(&self) -> ::std::sync::Arc<dyn ::nih_plug::prelude::Params> {
+            fn params(&self) -> ::std::sync::Arc<dyn ::nice_plug::prelude::Params> {
                 self.inner.params.clone()
             }
 
             fn editor(
                 &mut self,
-                _executor: ::nih_plug::prelude::AsyncExecutor<Self>,
-            ) -> Option<Box<dyn ::nih_plug::prelude::Editor>> {
+                _executor: ::nice_plug::prelude::AsyncExecutor<Self>,
+            ) -> Option<Self::Editor> {
                 $crate::editor::create(
                     self.inner.params.clone(),
                     self.inner.revision(),
@@ -266,17 +272,17 @@ macro_rules! export_revision {
                 )
             }
 
-            fn initialize(
+            fn activate(
                 &mut self,
-                layout: &::nih_plug::prelude::AudioIOLayout,
-                config: &::nih_plug::prelude::BufferConfig,
-                context: &mut impl ::nih_plug::prelude::InitContext<Self>,
+                layout: &::nice_plug::prelude::AudioIOLayout,
+                config: &::nice_plug::prelude::BufferConfig,
+                context: &mut impl ::nice_plug::prelude::ActivateContext<Self>,
             ) -> bool {
                 let channels = layout
                     .main_output_channels
-                    .map(::nih_plug::prelude::NonZeroU32::get)
+                    .map(::nice_plug::prelude::NonZeroU32::get)
                     .unwrap_or(2) as usize;
-                self.inner.initialize(channels, config.sample_rate);
+                self.inner.activate(channels, config.sample_rate);
                 context.set_latency_samples($crate::plugin::LATENCY);
                 true
             }
@@ -287,39 +293,51 @@ macro_rules! export_revision {
 
             fn process(
                 &mut self,
-                buffer: &mut ::nih_plug::prelude::Buffer,
-                _aux: &mut ::nih_plug::prelude::AuxiliaryBuffers,
-                _context: &mut impl ::nih_plug::prelude::ProcessContext<Self>,
-            ) -> ::nih_plug::prelude::ProcessStatus {
+                buffer: &mut ::nice_plug::prelude::Buffer,
+                _aux: &mut ::nice_plug::prelude::AuxiliaryBuffers,
+                _context: &mut impl ::nice_plug::prelude::ProcessContext<Self>,
+            ) -> ::nice_plug::prelude::ProcessStatus {
                 self.inner.process(buffer);
-                ::nih_plug::prelude::ProcessStatus::Normal
+                ::nice_plug::prelude::ProcessStatus::Normal
             }
         }
 
-        impl ::nih_plug::prelude::ClapPlugin for Plugin76 {
+        impl ::nice_plug::prelude::ClapPlugin for Plugin76 {
             const CLAP_ID: &'static str = $clap_id;
             const CLAP_DESCRIPTION: Option<&'static str> = Some($description);
             const CLAP_MANUAL_URL: Option<&'static str> =
-                Some(<Self as ::nih_plug::prelude::Plugin>::URL);
+                Some(<Self as ::nice_plug::prelude::Plugin>::URL);
             const CLAP_SUPPORT_URL: Option<&'static str> = None;
-            const CLAP_FEATURES: &'static [::nih_plug::prelude::ClapFeature] = &[
-                ::nih_plug::prelude::ClapFeature::AudioEffect,
-                ::nih_plug::prelude::ClapFeature::Stereo,
-                ::nih_plug::prelude::ClapFeature::Mono,
-                ::nih_plug::prelude::ClapFeature::Compressor,
-                ::nih_plug::prelude::ClapFeature::Limiter,
+            const CLAP_FEATURES: &'static [::nice_plug::prelude::ClapFeature] = &[
+                ::nice_plug::prelude::ClapFeature::AudioEffect,
+                ::nice_plug::prelude::ClapFeature::Stereo,
+                ::nice_plug::prelude::ClapFeature::Mono,
+                ::nice_plug::prelude::ClapFeature::Compressor,
+                ::nice_plug::prelude::ClapFeature::Limiter,
             ];
         }
 
-        impl ::nih_plug::prelude::Vst3Plugin for Plugin76 {
+        impl ::nice_plug::prelude::Vst3Plugin for Plugin76 {
             const VST3_CLASS_ID: [u8; 16] = *$vst3_id;
-            const VST3_SUBCATEGORIES: &'static [::nih_plug::prelude::Vst3SubCategory] = &[
-                ::nih_plug::prelude::Vst3SubCategory::Fx,
-                ::nih_plug::prelude::Vst3SubCategory::Dynamics,
+            const VST3_SUBCATEGORIES: &'static [::nice_plug::prelude::Vst3SubCategory] = &[
+                ::nice_plug::prelude::Vst3SubCategory::Fx,
+                ::nice_plug::prelude::Vst3SubCategory::Dynamics,
             ];
         }
 
-        ::nih_plug::nih_export_clap!(Plugin76);
-        ::nih_plug::nih_export_vst3!(Plugin76);
+        // AUv2 is macOS only, and addresses plugins by FourCCs rather than
+        // the CLAP and VST3 identifiers. BrTC is BurningTreeC.
+        #[cfg(target_os = "macos")]
+        impl ::nice_plug_au2::Au2Plugin for Plugin76 {
+            const AU2_CATEGORY: ::nice_plug_au2::Au2Category = ::nice_plug_au2::Au2Category::Effect;
+            const AU2_MANUFACTURER: [u8; 4] = *b"BrTC";
+            const AU2_SUBTYPE: [u8; 4] = *$au2_subtype;
+            const AU2_NAME: &'static str = $name;
+        }
+
+        ::nice_plug::nice_export_clap!(Plugin76);
+        ::nice_plug::nice_export_vst3!(Plugin76);
+        #[cfg(target_os = "macos")]
+        ::nice_plug_au2::nice_export_au2!(Plugin76);
     };
 }

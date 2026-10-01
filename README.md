@@ -1,8 +1,10 @@
 # Comp76Fx
 
 Three circuit models of the classic 1966 FET limiting amplifier, one per
-revision, built with [NIH-plug](https://github.com/robbert-vdh/nih-plug). Each
-builds as CLAP and VST3.
+revision, built with [nice-plug](https://codeberg.org/RustAudio/nice-plug) and
+a [Vizia](https://github.com/vizia/vizia) panel. Each builds as CLAP and VST3,
+and on macOS also as an Audio Unit (AUv2), through
+[nice-plug-au2](https://codeberg.org/fazibear/nice-plug-addons).
 
 | Plugin | Circuit | Character |
 | --- | --- | --- |
@@ -195,6 +197,10 @@ To build without installing:
 cargo xtask bundle -p comp76fx_rev_a -p comp76fx_rev_d -p comp76fx_rev_f --release
 ```
 
+On macOS, `cargo xtask bundle-universal` with the same packages, then
+`tools/package_au2.sh`, which wraps each universal binary in a signed
+`.component` for `~/Library/Audio/Plug-Ins/Components`.
+
 To try one without a host:
 
 ```sh
@@ -204,14 +210,13 @@ cargo run --release -p comp76fx_rev_d --features standalone -- --backend auto
 ## Licensing
 
 Under the **GNU General Public License version 3 or later**, whose text is in
-[`LICENSE`](LICENSE). NIH-plug itself is ISC licensed, but `nih_export_vst3!()`
-links the GPLv3 [vst3-sys](https://github.com/RustAudio/vst3-sys) bindings, so
-any VST3 built with it has to be able to comply with the GPL.
+[`LICENSE`](LICENSE).
 
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) reproduces the licences and
-copyright notices of every crate the plugins link. Noto Sans is compiled in for
-the panel lettering and is under the SIL Open Font License 1.1. Regenerate the
-file after changing dependencies:
+copyright notices of every crate the plugins link on any platform, and of the
+Skia library the panel is drawn with. Noto Sans is compiled in for the panel
+lettering and is under the SIL Open Font License 1.1. Regenerate the file after
+changing dependencies:
 
 ```sh
 python3 tools/third-party-notices.py
@@ -227,8 +232,11 @@ python3 tools/third-party-notices.py
 | `core/src/dsp/amp.rs` | the Class A and Class AB output stages |
 | `core/src/editor/` | the front panel |
 | `core/src/presets.rs` | built-in and saved presets |
-| `rev_a`, `rev_d`, `rev_f` | one identity each: names and plugin ids |
+| `rev_a`, `rev_d`, `rev_f` | one identity each: names and plugin ids, CLAP, VST3 and AU |
 | `core/tests/compression.rs` | the measurements above |
 | `core/tests/latency.rs` | reported latency and the dry signal's alignment |
 | `core/tests/threshold.rs` | the threshold circuit against the manual |
-| `vendor/baseview` | the GUI window backend, patched for Windows; see its `PATCHES.md` |
+| `vendor/baseview` | the GUI window backend, patched for Windows and X11; see its `PATCHES.md` |
+| `vendor/vizia`, `vendor/vizia_plug` | Vizia 0.4 and its plugin adapter, ported to that backend and to nice-plug |
+| `vendor/nice-plug-au2` | the Audio Unit wrapper, fixed so the three revisions can share a host |
+| `tools/package_au2.sh` | builds the macOS `.component` bundles |

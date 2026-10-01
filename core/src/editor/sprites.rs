@@ -7,16 +7,20 @@
 //! are drawn through a canvas transform, about the shaft rather than about the
 //! middle of the image.
 //!
-//! An image belongs to the canvas that uploaded it, and a second instance of
-//! the plugin gets a second canvas, so each widget uploads and caches its own
-//! rather than sharing one through a global. A [`Sprite`] is tied to one image
-//! when it is made: a cache that took its image as an argument on every draw
-//! kept whichever it saw first and quietly drew that for the other, which is
-//! how the switch caps never changed colour when pressed.
+//! Each widget decodes and caches its own images rather than sharing them
+//! through a global. That was forced under femtovg, where an image belonged to
+//! the canvas that uploaded it and a second instance of the plugin had a
+//! second canvas; Skia's decoded images are not tied to a canvas, but keeping
+//! them per widget keeps two instances from sharing anything at all. A
+//! [`Sprite`] is tied to one image when it is made: a cache that took its
+//! image as an argument on every draw kept whichever it saw first and quietly
+//! drew that for the other, which is how the switch caps never changed colour
+//! when pressed.
 
-use nih_plug_vizia::vizia::prelude::Canvas;
-use nih_plug_vizia::vizia::vg;
-use std::cell::Cell;
+use super::paint::{self as vg, PanelCanvas};
+use std::cell::OnceCell;
+use vizia_plug::vizia::prelude::{BoundingBox, Canvas};
+use vizia_plug::vizia::vg as sk;
 
 pub const KNOB_LARGE: &[u8] = include_bytes!("../../../assets/gen/knob_large.png");
 pub const KNOB_SMALL: &[u8] = include_bytes!("../../../assets/gen/knob_small.png");
@@ -105,94 +109,93 @@ pub struct Placement {
     pub pivot: (f32, f32),
 }
 
-/// One image, uploaded lazily. The canvas is only reachable from `draw`, so
-/// the upload happens on the first frame and the id is kept from then on.
+/// One image, decoded lazily. The canvas is only reachable from `draw`, so
+/// the decode happens on the first frame and the image is kept from then on.
 pub struct Sprite {
     bytes: &'static [u8],
-    id: Cell<Option<vg::ImageId>>,
+    image: OnceCell<Option<sk::Image>>,
+}
+
+/// Mipmaps keep the controls from crawling when the window is scaled.
+fn sampling() -> sk::SamplingOptions {
+    sk::SamplingOptions::new(sk::FilterMode::Linear, sk::MipmapMode::Linear)
 }
 
 impl Sprite {
     pub const fn new(bytes: &'static [u8]) -> Self {
         Self {
             bytes,
-            id: Cell::new(None),
+            image: OnceCell::new(),
         }
     }
 
-    fn id(&self, canvas: &mut Canvas) -> Option<vg::ImageId> {
-        if let Some(id) = self.id.get() {
-            return Some(id);
-        }
-        // Mipmaps keep the controls from crawling when the window is scaled.
-        match canvas.load_image_mem(self.bytes, vg::ImageFlags::GENERATE_MIPMAPS) {
-            Ok(id) => {
-                self.id.set(Some(id));
-                Some(id)
-            }
-            Err(_) => None,
-        }
+    fn image(&self) -> Option<&sk::Image> {
+        self.image
+            .get_or_init(|| sk::Image::from_encoded(sk::Data::new_copy(self.bytes)))
+            .as_ref()
     }
 
     /// Draws one frame of a vertical filmstrip with its shaft on a point.
     ///
     /// No rotation is applied: the frame was rendered at the angle wanted, so
     /// its highlights and shadow sit where the panel light put them.
-    pub fn draw_frame(&self, canvas: &mut Canvas, at: Placement, frame: usize, frames: usize) {
-        let Some(id) = self.id(canvas) else {
+    pub fn draw_frame(&self, canvas: &Canvas, at: Placement, frame: usize, frames: usize) {
+        let Some(image) = self.image() else {
             return;
         };
-        let Ok((iw, ih)) = canvas.image_size(id) else {
-            return;
-        };
+        let (iw, ih) = (image.width() as f32, image.height() as f32);
         let strip = frames.max(1);
         let frame = frame.min(strip - 1);
-        let cell = ih as f32 / strip as f32;
+        let cell = ih / strip as f32;
         let scale = at.height / cell;
-        let (w, h) = (iw as f32 * scale, cell * scale);
+        let (w, h) = (iw * scale, cell * scale);
+
+        // Only the wanted frame is read, and strictly: the renders are framed
+        // to the knob's silhouette, so the next frame starts right at its
+        // edge and filtering across the boundary would pick up its rim.
+        let source = sk::Rect::from_xywh(0.0, frame as f32 * cell, iw, cell);
+        canvas.draw_image_rect_with_sampling_options(
+            image,
+            Some((&source, sk::canvas::SrcRectConstraint::Strict)),
+            sk::Rect::from_xywh(at.x - w * at.pivot.0, at.y - h * at.pivot.1, w, h),
+            sampling(),
+            &sk::Paint::default(),
+        );
+    }
+
+    /// Draws the photograph with its shaft on a point, turned by `degrees`.
+    pub fn draw(&self, canvas: &Canvas, at: Placement) {
+        let Some(image) = self.image() else {
+            return;
+        };
+        let scale = at.height / image.height() as f32;
+        let (w, h) = (image.width() as f32 * scale, image.height() as f32 * scale);
 
         canvas.save();
-        canvas.translate(at.x - w * at.pivot.0, at.y - h * at.pivot.1);
-        // The paint covers the whole strip, shifted so the wanted frame lands
-        // on the rectangle being filled; the path clips away the rest.
-        let mut path = vg::Path::new();
-        path.rect(0.0, 0.0, w, h);
-        canvas.fill_path(
-            &path,
-            &vg::Paint::image(id, 0.0, -(frame as f32) * h, w, h * strip as f32, 0.0, 1.0),
+        canvas.translate((at.x, at.y));
+        canvas.rotate(at.degrees, None);
+        canvas.draw_image_rect_with_sampling_options(
+            image,
+            None,
+            sk::Rect::from_xywh(-w * at.pivot.0, -h * at.pivot.1, w, h),
+            sampling(),
+            &sk::Paint::default(),
         );
         canvas.restore();
     }
 
-    /// Draws the photograph with its shaft on a point, turned by `degrees`.
-    pub fn draw(&self, canvas: &mut Canvas, at: Placement) {
-        let Some(id) = self.id(canvas) else {
-            return;
-        };
-        let Ok((iw, ih)) = canvas.image_size(id) else {
-            return;
-        };
-        let scale = at.height / ih as f32;
-        let (w, h) = (iw as f32 * scale, ih as f32 * scale);
-
-        canvas.save();
-        canvas.translate(at.x, at.y);
-        canvas.rotate(at.degrees.to_radians());
-        canvas.translate(-w * at.pivot.0, -h * at.pivot.1);
-        let mut path = vg::Path::new();
-        path.rect(0.0, 0.0, w, h);
-        canvas.fill_path(&path, &vg::Paint::image(id, 0.0, 0.0, w, h, 0.0, 1.0));
-        canvas.restore();
-    }
-
     /// Draws it upright, stretched to fill a rectangle.
-    pub fn draw_rect(&self, canvas: &mut Canvas, x: f32, y: f32, w: f32, h: f32) {
-        let Some(id) = self.id(canvas) else {
+    pub fn draw_rect(&self, canvas: &Canvas, x: f32, y: f32, w: f32, h: f32) {
+        let Some(image) = self.image() else {
             return;
         };
-        let mut path = vg::Path::new();
-        path.rect(x, y, w, h);
-        canvas.fill_path(&path, &vg::Paint::image(id, x, y, w, h, 0.0, 1.0));
+        canvas.draw_image_rect_with_sampling_options(
+            image,
+            None,
+            sk::Rect::from_xywh(x, y, w, h),
+            sampling(),
+            &sk::Paint::default(),
+        );
     }
 }
 
@@ -213,13 +216,7 @@ impl Cap {
 
     /// Draws the cap in its bezel. The photographed caps come in two colours,
     /// and the pressed one also sits lower in its bezel.
-    pub fn draw(
-        &self,
-        canvas: &mut Canvas,
-        b: nih_plug_vizia::vizia::prelude::BoundingBox,
-        scale: f32,
-        pressed: bool,
-    ) {
+    pub fn draw(&self, canvas: &Canvas, b: BoundingBox, scale: f32, pressed: bool) {
         // The bezel stands off the panel, so it throws a shadow of its own.
         // Without it the bank of switches reads as four rectangles painted on
         // rather than four caps standing proud of it.
@@ -235,8 +232,8 @@ impl Cap {
                 b.y,
                 b.x,
                 b.y + b.h,
-                vg::Color::rgb(0x08, 0x08, 0x0a),
-                vg::Color::rgb(0x1a, 0x1a, 0x1e),
+                super::style::rgb(0x08080a),
+                super::style::rgb(0x1a1a1e),
             ),
         );
 
@@ -250,9 +247,10 @@ impl Cap {
         if !pressed {
             let mut shadow = vg::Path::new();
             shadow.rounded_rect(x, y + 2.0 * scale, w, h, 2.0 * scale);
-            let mut ink = vg::Color::black();
-            ink.set_alphaf(0.6);
-            canvas.fill_path(&shadow, &vg::Paint::color(ink));
+            canvas.fill_path(
+                &shadow,
+                &vg::Paint::color(super::style::rgba(0x000000, 0.6)),
+            );
         }
 
         let sprite = if pressed { &self.pressed } else { &self.out };

@@ -25,14 +25,20 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libgl-dev libjack-dev \
-            libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev \
-            libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
+          sudo apt-get install -y libasound2-dev libgl-dev libegl1-mesa-dev \
+            libwayland-dev libfontconfig1-dev libjack-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
+      # This workspace's own crates. `--all` would also take in every path
+      # dependency, and the vendored crates are kept as they were vendored.
+      - run: >-
+          cargo fmt --check -p comp76fx_core -p comp76fx_rev_a
+          -p comp76fx_rev_d -p comp76fx_rev_f -p installer -p xtask
       - run: cargo test --release --workspace
       - name: Test the window backend
         run: cargo test --manifest-path vendor/baseview/Cargo.toml --lib
@@ -60,9 +66,11 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libgl-dev libjack-dev \
-            libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev \
-            libxcursor-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev
+          sudo apt-get install -y libasound2-dev libgl-dev libegl1-mesa-dev \
+            libwayland-dev libfontconfig1-dev libjack-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libgl1-mesa-dri mesa-utils xvfb
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -75,7 +83,7 @@ jobs:
 
       - name: Test the Windows window backend
         if: startsWith(matrix.os, 'windows')
-        run: cargo test --manifest-path vendor/baseview/Cargo.toml --features opengl --lib -- --test-threads=1
+        run: cargo test --manifest-path vendor/baseview/Cargo.toml --features opengl,tracing --lib -- --test-threads=1
 
       - name: Build the installer
         # A small dependency free program that copies the bundles into place,
@@ -94,9 +102,88 @@ jobs:
             # needs no Apple account, and an arm64 binary will not load at all
             # without at least an ad-hoc signature.
             cargo xtask bundle-universal "${packages[@]}" --release
+            # The same universal binaries carry the AUv2 entry points, which
+            # this wraps in a signed .component bundle per revision.
+            bash tools/package_au2.sh
           else
             cargo xtask bundle "${packages[@]}" --release
           fi
+
+      # More than that a .component directory exists: the bundle structure,
+      # both architectures, the factory and registration symbols, this
+      # revision's own Cocoa view factory class, valid plist metadata and a
+      # valid ad-hoc signature.
+      - name: Verify the Audio Unit components
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          set -euo pipefail
+          for entry in "Rev A:C76A:comp76fx_rev_a" "Rev D:C76D:comp76fx_rev_d" "Rev F:C76F:comp76fx_rev_f"; do
+            IFS=: read -r revision subtype crate <<<"$entry"
+            plugin="Comp76Fx $revision"
+            component="target/bundled/$plugin.component"
+            plist="$component/Contents/Info.plist"
+            binary="$component/Contents/MacOS/$plugin"
+            echo "== $plugin"
+            test -d "$component/Contents/Resources"
+            test -x "$binary"
+            plutil -lint "$plist"
+            read_plist() { /usr/libexec/PlistBuddy -c "Print :$1" "$plist"; }
+            [[ "$(read_plist CFBundleExecutable)" == "$plugin" ]]
+            [[ "$(read_plist CFBundlePackageType)" == "BNDL" ]]
+            [[ "$(read_plist AudioComponents:0:type)" == "aufx" ]]
+            [[ "$(read_plist AudioComponents:0:subtype)" == "$subtype" ]]
+            [[ "$(read_plist AudioComponents:0:manufacturer)" == "BrTC" ]]
+            [[ "$(read_plist AudioComponents:0:factoryFunction)" == "NiceAu2Factory" ]]
+            archs="$(lipo -archs "$binary")"
+            [[ "$archs" == *x86_64* && "$archs" == *arm64* ]]
+            nm -gU "$binary" | grep -E '(_)?NiceAu2Factory$'
+            nm -gU "$binary" | grep -E '(_)?nice_au2_register_plugin_entry$'
+            nm -gU "$binary" | grep -E '(_)?nice_au2_metadata$'
+            strings -a "$binary" | grep -x "NiceAu2CocoaViewFactory_$crate"
+            codesign --verify --deep --strict --verbose=2 "$component"
+          done
+
+      # Ask macOS's own validator to find and validate each component, from
+      # the runner user's Components folder where AudioComponentRegistrar
+      # looks.
+      - name: Validate the Audio Unit components with auval
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          set -uo pipefail
+          au_dir="$HOME/Library/Audio/Plug-Ins/Components"
+          mkdir -p "$au_dir"
+          for revision in "Rev A" "Rev D" "Rev F"; do
+            rm -rf "$au_dir/Comp76Fx $revision.component"
+            cp -R "target/bundled/Comp76Fx $revision.component" "$au_dir/"
+            xattr -dr com.apple.quarantine "$au_dir/Comp76Fx $revision.component" 2>/dev/null || true
+          done
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 3
+          auval -a | grep -E 'BrTC|Comp76Fx' || true
+
+          failed=0
+          for subtype in C76A C76D C76F; do
+            echo
+            echo "== auval -v aufx $subtype BrTC"
+            auval -v aufx "$subtype" BrTC 2>&1 | tee "/tmp/auval-$subtype.log"
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then
+              grep -n -B 8 -A 15 -E 'ERROR:|FAILED|VERIFYING CLASS INFO' "/tmp/auval-$subtype.log" || true
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+      # The real editor, through the CLAP C ABI under Xvfb: it opens at its
+      # size, paints, zooms from its own menu, hides, shows and is recreated.
+      - name: Test the Linux CLAP editors
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          for revision in "Rev A" "Rev D" "Rev F"; do
+            LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a \
+              -s '-screen 0 2560x1440x24 +extension GLX +render' \
+              timeout 45s python3 tools/linux_gui_smoke.py "target/bundled/Comp76Fx $revision.clap"
+          done
 
       - name: Stage the archive contents
         run: |
@@ -115,6 +202,12 @@ jobs:
               chmod +x "$staged/install.sh"
               ;;
             macOS)
+              # Every revision in every format, or the archive is not shipped.
+              for revision in "Rev A" "Rev D" "Rev F"; do
+                for format in clap vst3 component; do
+                  test -e "$staged/Comp76Fx $revision.$format"
+                done
+              done
               cp .github/install-macOS.command "$staged/Install.command"
               chmod +x "$staged/Install.command"
               ;;
@@ -168,8 +261,10 @@ jobs:
           `Install.command` on macOS. `README.txt` covers installing by hand.
           Every archive also contains `LICENSE` and `THIRD-PARTY-NOTICES.md`.
 
-          **macOS:** the plugins are ad-hoc signed but not notarized, so macOS
-          quarantines them. `Install.command` in the archive puts them in place
-          and clears the quarantine flag; `README.txt` has the manual commands
-          if you would rather do it yourself.
+          **macOS:** the archive holds universal (Apple Silicon and Intel)
+          CLAP, VST3 and Audio Unit v2 (`.component`) builds of each revision.
+          They are ad-hoc signed but not notarized, so macOS quarantines them.
+          `Install.command` in the archive puts them in place and clears the
+          quarantine flag; `README.txt` has the manual commands if you would
+          rather do it yourself.
           NOTES

@@ -1,8 +1,8 @@
 //! Front panel controls, shared by every revision.
 
-use nih_plug::prelude::*;
-use nih_plug_vizia::ViziaState;
+use nice_plug::prelude::*;
 use std::sync::{Arc, Mutex};
+use vizia_plug::ViziaState;
 
 use crate::dsp::Controls;
 

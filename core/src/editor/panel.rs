@@ -1,10 +1,10 @@
 //! The faceplate: anodised aluminium, the painted section the Rev A is named
 //! for, the rack hardware and the engraved scales around each control.
 
-use nih_plug_vizia::vizia::prelude::*;
-use nih_plug_vizia::vizia::vg;
+use vizia_plug::vizia::prelude::*;
 
 use super::layout;
+use super::paint::{self as vg, PanelCanvas};
 use super::sprites::{self, Placement, Sprite};
 use super::style::*;
 use crate::dsp::{Finish, Revision};
@@ -30,11 +30,13 @@ impl Faceplate {
             screws: sprites::SCREWS.map(Sprite::new),
         }
         .build(cx, |_| {})
-        .position_type(PositionType::SelfDirected)
+        .position_type(PositionType::Absolute)
         .left(Pixels(0.0))
         .top(Pixels(0.0))
         .width(Percentage(100.0))
         .height(Percentage(100.0))
+        // Nothing on the faceplate is clicked; the controls bolted to it are.
+        .hoverable(false)
     }
 }
 
@@ -43,7 +45,7 @@ impl View for Faceplate {
         Some("comp76-faceplate")
     }
 
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         let scale = cx.scale_factor();
 

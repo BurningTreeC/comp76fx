@@ -14,16 +14,23 @@ By hand
 -------
 Copy the bundles (they are folders, copy the whole thing) to:
 
-  CLAP   ~/Library/Audio/Plug-Ins/CLAP/
-  VST3   ~/Library/Audio/Plug-Ins/VST3/
+  CLAP        ~/Library/Audio/Plug-Ins/CLAP/
+  VST3        ~/Library/Audio/Plug-Ins/VST3/
+  Audio Unit  ~/Library/Audio/Plug-Ins/Components/
 
-(Install.command puts them in a BurningTreeC subfolder of each, which hosts
-search just the same.)
+(Install.command puts the CLAP and VST3 bundles in a BurningTreeC subfolder of
+each, which hosts search just the same. Audio Units have to go directly in
+Components.)
 
 Then open Terminal and run:
 
   xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/CLAP/
   xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/
+  xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/
+  killall -9 AudioComponentRegistrar
+
+The last command makes macOS forget what it had cached about Audio Units, so
+a host sees the new ones; it restarts by itself.
 
 Why that last step is needed
 ----------------------------
@@ -37,8 +44,8 @@ refuses to load quarantined code that is not notarized. Removing the flag with
 the command above tells macOS you trust these files. Nothing else about the
 plugins changes.
 
-Note that Logic and GarageBand only load Audio Units, and this plugin is CLAP
-and VST3, so use a host that supports those.
+Each revision comes as CLAP, VST3 and Audio Unit (AUv2), so Logic and
+GarageBand, which only load Audio Units, can use them too.
 
 This program comes with ABSOLUTELY NO WARRANTY. It is free software under the
 GNU General Public License version 3 or later; see LICENSE. The licences of

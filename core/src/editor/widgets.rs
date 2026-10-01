@@ -1,14 +1,14 @@
 //! The panel's controls: knobs, the latching push buttons and the meter.
 
-use nih_plug::prelude::Param;
-use nih_plug_vizia::vizia::prelude::*;
-use nih_plug_vizia::vizia::vg;
-use nih_plug_vizia::widgets::param_base::ParamWidgetBase;
-use nih_plug_vizia::widgets::{util::ModifiersExt, RawParamEvent};
+use nice_plug::prelude::{Param, ParamPtr};
 use std::cell::Cell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use vizia_plug::vizia::prelude::*;
+use vizia_plug::widgets::param_base::ParamWidgetBase;
+use vizia_plug::widgets::{util::ModifiersExt, RawParamEvent};
 
+use super::paint::{self as vg, PanelCanvas};
 use super::sprites::{self, Cap, Placement, Sprite};
 use super::style::*;
 use crate::meters::{Meters, Reading};
@@ -49,57 +49,36 @@ pub struct Knob {
 }
 
 impl Knob {
-    pub fn new<L, Params, P, FMap>(
-        cx: &mut Context,
-        params: L,
-        params_to_param: FMap,
+    pub fn new<'a, P: Param + 'static>(
+        cx: &'a mut Context,
+        param: &P,
         radius: f32,
-    ) -> Handle<'_, Self>
-    where
-        L: Lens<Target = Params> + Clone,
-        Params: 'static,
-        P: Param + 'static,
-        FMap: Fn(&Params) -> &P + Copy + 'static,
-    {
-        Self::construct(cx, params, params_to_param, None, radius)
+    ) -> Handle<'a, Self> {
+        let param = ParamWidgetBase::new(cx, param);
+        Self::construct(cx, param, None, radius)
     }
 
     /// A knob with an OFF position below its lowest mark, which switches
-    /// `params_to_off` off. Moving the knob back up switches it on again.
-    pub fn with_off_switch<L, Params, P, Q, FMap, GMap>(
-        cx: &mut Context,
-        params: L,
-        params_to_param: FMap,
-        params_to_off: GMap,
+    /// `off` off. Moving the knob back up switches it on again.
+    pub fn with_off_switch<'a, P: Param + 'static, Q: Param + 'static>(
+        cx: &'a mut Context,
+        param: &P,
+        off: &Q,
         radius: f32,
-    ) -> Handle<'_, Self>
-    where
-        L: Lens<Target = Params> + Clone,
-        Params: 'static,
-        P: Param + 'static,
-        Q: Param + 'static,
-        FMap: Fn(&Params) -> &P + Copy + 'static,
-        GMap: Fn(&Params) -> &Q + Copy + 'static,
-    {
-        let off = ParamWidgetBase::new(cx, params, params_to_off);
-        Self::construct(cx, params, params_to_param, Some(off), radius)
+    ) -> Handle<'a, Self> {
+        let param = ParamWidgetBase::new(cx, param);
+        let off = ParamWidgetBase::new(cx, off);
+        Self::construct(cx, param, Some(off), radius)
     }
 
-    fn construct<L, Params, P, FMap>(
+    fn construct(
         cx: &mut Context,
-        params: L,
-        params_to_param: FMap,
+        param: ParamWidgetBase,
         off: Option<ParamWidgetBase>,
         radius: f32,
-    ) -> Handle<'_, Self>
-    where
-        L: Lens<Target = Params> + Clone,
-        Params: 'static,
-        P: Param + 'static,
-        FMap: Fn(&Params) -> &P + Copy + 'static,
-    {
+    ) -> Handle<'_, Self> {
         Self {
-            param: ParamWidgetBase::new(cx, params, params_to_param),
+            param,
             off,
             radius,
             dragging: false,
@@ -111,13 +90,7 @@ impl Knob {
                 sprites::KNOB_SMALL
             }),
         }
-        .build(
-            cx,
-            ParamWidgetBase::build_view(params, params_to_param, move |cx, data| {
-                let value = data.make_lens(|param| param.modulated_normalized_value());
-                Binding::new(cx, value, |cx, _| cx.needs_redraw());
-            }),
-        )
+        .build(cx, |_| {})
         .width(Pixels(radius * 2.0))
         .height(Pixels(radius * 2.0))
     }
@@ -195,7 +168,7 @@ impl View for Knob {
         Some("comp76-knob")
     }
 
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let bounds = cx.bounds();
         let r = self.radius * cx.scale_factor();
         // Pick the frame rendered at this angle rather than turning one image,
@@ -280,7 +253,7 @@ impl View for Knob {
                     // thing anybody tries.
                     self.finish(cx);
                     self.dragging = true;
-                    self.last_y = cx.mouse().cursory;
+                    self.last_y = cx.mouse().cursor_y;
                     self.travel = self.position();
                     cx.capture();
                     cx.focus();
@@ -352,34 +325,21 @@ pub struct PushButton {
     param: ParamWidgetBase,
     cap: Cap,
     /// The other switches in the same bank, which a plain click releases.
-    bank: Vec<nih_plug::prelude::ParamPtr>,
+    bank: Vec<ParamPtr>,
 }
 
 impl PushButton {
-    pub fn new<'a, L, Params, P, FMap>(
+    pub fn new<'a, P: Param + 'static>(
         cx: &'a mut Context,
-        params: L,
-        params_to_param: FMap,
-        bank: Vec<nih_plug::prelude::ParamPtr>,
-    ) -> Handle<'a, Self>
-    where
-        L: Lens<Target = Params> + Clone,
-        Params: 'static,
-        P: Param + 'static,
-        FMap: Fn(&Params) -> &P + Copy + 'static,
-    {
+        param: &P,
+        bank: Vec<ParamPtr>,
+    ) -> Handle<'a, Self> {
         Self {
-            param: ParamWidgetBase::new(cx, params, params_to_param),
+            param: ParamWidgetBase::new(cx, param),
             cap: Cap::new(),
             bank,
         }
-        .build(
-            cx,
-            ParamWidgetBase::build_view(params, params_to_param, move |cx, data| {
-                let value = data.make_lens(|param| param.modulated_normalized_value());
-                Binding::new(cx, value, |cx, _| cx.needs_redraw());
-            }),
-        )
+        .build(cx, |_| {})
     }
 }
 
@@ -388,7 +348,7 @@ impl View for PushButton {
         Some("comp76-button")
     }
 
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let pressed = self.param.modulated_normalized_value() > 0.5;
         self.cap
             .draw(canvas, cx.bounds(), cx.scale_factor(), pressed);
@@ -565,7 +525,7 @@ impl View for VuMeter {
         Some("comp76-meter")
     }
 
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         let b = cx.bounds();
         let scale = cx.scale_factor();
         let lit = self.params.powered();
@@ -596,7 +556,7 @@ impl View for VuMeter {
         // The tail stops short of the hub, which covers it on the real thing.
         let (tail_x, tail_y) = (pivot_x + reach_x * 0.16, pivot_y + reach_y * 0.16);
 
-        canvas.scissor(b.x, b.y, b.w, b.h);
+        canvas.clip_to(b.x, b.y, b.w, b.h);
         let mut needle = vg::Path::new();
         needle.move_to(tail_x, tail_y);
         needle.line_to(tip_x, tip_y);
@@ -608,7 +568,7 @@ impl View for VuMeter {
             &needle,
             &vg::Paint::color(rgb(0x18_18_1a)).with_line_width(1.7 * scale),
         );
-        canvas.reset_scissor();
+        canvas.restore();
 
         // The face goes dark when the meter switch is off.
         if !lit {
@@ -630,32 +590,19 @@ pub struct ModeButton {
 }
 
 impl ModeButton {
-    pub fn new<L, Params, P, FMap>(
-        cx: &mut Context,
-        params: L,
-        params_to_param: FMap,
+    pub fn new<'a, P: Param + 'static>(
+        cx: &'a mut Context,
+        param: &P,
         index: usize,
         positions: usize,
-    ) -> Handle<'_, Self>
-    where
-        L: Lens<Target = Params> + Clone,
-        Params: 'static,
-        P: Param + 'static,
-        FMap: Fn(&Params) -> &P + Copy + 'static,
-    {
+    ) -> Handle<'a, Self> {
         Self {
-            param: ParamWidgetBase::new(cx, params, params_to_param),
+            param: ParamWidgetBase::new(cx, param),
             cap: Cap::new(),
             index,
             positions,
         }
-        .build(
-            cx,
-            ParamWidgetBase::build_view(params, params_to_param, move |cx, data| {
-                let value = data.make_lens(|param| param.modulated_normalized_value());
-                Binding::new(cx, value, |cx, _| cx.needs_redraw());
-            }),
-        )
+        .build(cx, |_| {})
     }
 
     fn selected(&self) -> bool {
@@ -670,7 +617,7 @@ impl View for ModeButton {
         Some("comp76-mode")
     }
 
-    fn draw(&self, cx: &mut DrawContext, canvas: &mut Canvas) {
+    fn draw(&self, cx: &mut DrawContext, canvas: &Canvas) {
         self.cap
             .draw(canvas, cx.bounds(), cx.scale_factor(), self.selected());
     }

@@ -8,7 +8,7 @@ Read `AGENTS.md` and follow its rules. They cover the environment and which tool
 
 ## What this is
 
-Comp76Fx: three CLAP/VST3 plugins, each modelling a different revision (A, D, F) of the 1176-style FET limiting amplifier. They are built with NIH-plug and a vizia GUI. Licensed GPL-3.0-or-later, because VST3 export links the GPL vst3-sys.
+Comp76Fx: three CLAP/VST3 plugins, plus Audio Unit v2 on macOS, each modelling a different revision (A, D, F) of the 1176-style FET limiting amplifier. They are built with nice-plug (the NIH-plug successor) and a Vizia 0.4 GUI drawn with Skia, ported the same way as the sibling `../gainstagefx`; AUv2 comes from nice-plug-au2. Licensed GPL-3.0-or-later. (nice-plug's VST3 export uses the MIT/Apache `vst3` crate, not NIH-plug's GPL vst3-sys.)
 
 ## Commands
 
@@ -34,8 +34,19 @@ cargo clippy --release --workspace --all-targets -- -D warnings
 cargo run --release -p comp76fx_core --example bench
 
 # Screenshot one revision's standalone panel (Hyprland: hyprctl, grim, magick). Output, DPI scale, revision a|d|f.
-# Builds the standalone first; the panel pictures stay sharp up to about 2x. doc/panel.png is Rev D at 1.5.
+# Builds the standalone first. The scale can only be 1.5, the panel's 100 %. doc/panel.png is Rev D at 1.5.
 ./shot.sh doc/panel.png 1.5 d
+
+# The real editor, headless: every revision and overlay drawn through Skia's raster surface.
+# COMP76FX_GUI_SNAPSHOTS=<dir> writes each frame there as a PNG.
+cargo test --release -p comp76fx_core --lib render_tests
+
+# The bundled CLAP editor through the CLAP C ABI on X11 (a desktop or xvfb-run): opens, paints, zooms
+# from its own size menu, hides, shows, recreates. CI runs it for all three under Xvfb.
+python3 tools/linux_gui_smoke.py "target/bundled/Comp76Fx Rev D.clap"
+
+# macOS: wrap the universal binaries in signed AUv2 .component bundles (after cargo xtask bundle-universal ...)
+bash tools/package_au2.sh
 
 # Regenerate after any dependency change. CI fails if the output differs from the committed file.
 python3 tools/third-party-notices.py
@@ -43,22 +54,32 @@ python3 tools/third-party-notices.py
 # Tests for the vendored window backend
 cargo test --manifest-path vendor/baseview/Cargo.toml --lib
 
-# Windows: cross-check, and run unit tests under Wine (the x86_64-pc-windows-gnu target and wine are installed)
-cargo clippy --release --target x86_64-pc-windows-gnu -p comp76fx_core -p comp76fx_rev_d -- -D warnings
-cargo test --release --target x86_64-pc-windows-gnu -p comp76fx_core --lib --no-run   # then: wine <printed .exe> --test-threads=1
+# Windows: Skia builds only against MSVC, so the plugins are cross-checked for the msvc target (Skia's prebuilt
+# binaries are downloaded; `cargo clippy` needs no MSVC linker). The x86_64-pc-windows-msvc std is installed.
+cargo clippy --release --target x86_64-pc-windows-msvc -p comp76fx_core -p comp76fx_rev_a -p comp76fx_rev_d -p comp76fx_rev_f -- -D warnings
+# The window backend has no Skia, so its Windows tests run under Wine (x86_64-pc-windows-gnu and wine are installed)
+cargo test --manifest-path vendor/baseview/Cargo.toml --features opengl,tracing --lib --target x86_64-pc-windows-gnu --no-run   # then: wine <printed .exe> --test-threads=1
+
+# macOS: core checks for aarch64-apple-darwin; the revision crates need the macOS SDK (coreaudio-sys), so CI builds them
+cargo clippy --release --target aarch64-apple-darwin -p comp76fx_core -- -D warnings
 ```
 
-The workspace is `cargo fmt` clean, and CI runs `cargo fmt --all --check` before the tests. The code under `vendor/` is not formatted.
+The workspace's own crates are `cargo fmt` clean, and CI checks them before the tests with `cargo fmt --check -p comp76fx_core -p comp76fx_rev_a -p comp76fx_rev_d -p comp76fx_rev_f -p installer -p xtask`. Not `--all`: that also formats every path dependency, and the code under `vendor/` is kept as vendored.
 
 ## Architecture
 
 **Workspace layout.**
 - `core/` holds everything: DSP, GUI, the plugin body and presets.
-- `rev_a/`, `rev_d/`, `rev_f/` each contain only one `export_revision!` invocation: the plugin's name, its ids and which revision it uses. The macro generates the `Plugin`/`ClapPlugin`/`Vst3Plugin` impls. The circuit values are in `core/src/dsp/revisions.rs` (`REV_A`, `REV_D`, `REV_F`), so the tests and the bench measure exactly what ships; use `REV_X.without_noise()` for measurements. Circuit differences between revisions must be expressed as fields of `dsp::Revision`, never as per-revision code. Do not change the CLAP/VST3 ids, since hosts use them to identify saved sessions.
-- `xtask/` wraps `nih_plug_xtask`.
+- `rev_a/`, `rev_d/`, `rev_f/` each contain only one `export_revision!` invocation: the plugin's name, its ids and which revision it uses. The macro generates the `Plugin`/`ClapPlugin`/`Vst3Plugin` impls and, on macOS, `Au2Plugin` and the AUv2 export (manufacturer `BrTC`, subtypes `C76A`, `C76D`, `C76F`). Each also has a `build.rs` that compiles its own Audio Unit Cocoa view factory (see `vendor/nice-plug-au2/PATCHES.md`); it does nothing off macOS. The circuit values are in `core/src/dsp/revisions.rs` (`REV_A`, `REV_D`, `REV_F`), so the tests and the bench measure exactly what ships; use `REV_X.without_noise()` for measurements. Circuit differences between revisions must be expressed as fields of `dsp::Revision`, never as per-revision code. Do not change the CLAP/VST3 ids or the AU subtypes, since hosts use them to identify saved sessions.
+- `xtask/` wraps `nice_plug_xtask`.
 - `installer/` is the `install.exe` shipped in the Windows archive. It has no dependencies on purpose, so nothing new needs adding to the licence notices.
-- `vendor/baseview/` is a patched copy of the GUI window backend, fixing Windows mouse-capture, resize and text-entry problems. It is kept identical to the copy in the sibling `../gainstagefx` repo, apart from the project name in `PATCHES.md`, which documents every change. It is excluded from the workspace and substituted through `[patch]` in the root `Cargo.toml`. `core` also depends on it directly, only to call `baseview::set_text_input`. After copying files into it, `touch` them: cargo spots changes to path dependencies by file modification time, and `rsync -a`/`cp -p` keep the old times, which leaves a stale build in use.
-- NIH-plug is pinned to one git rev in `Cargo.toml` and `xtask/Cargo.toml`. Keep the two in step.
+- `vendor/` holds the GUI stack, copied from the sibling `../gainstagefx` repo and kept identical to its copies apart from the project name in each `PATCHES.md`, which documents every change:
+  - `baseview/` (0.3.4), the window backend, with Windows mouse-capture, resize and text-entry fixes and X11 frame-startup fixes. Substituted through `[patch.crates-io]` in the root `Cargo.toml`, so Vizia and its adapter share it.
+  - `vizia/` (0.4.0), whose baseview backend is ported to baseview 0.3.4, and `vizia_plug/`, the Vizia adapter ported to nice-plug.
+  - `nice-plug-au2/`, a workspace member, is the exception: it carries three fixes of its own on top of gainstagefx's copy, which three Audio Units loaded into one host need (see its `PATCHES.md`).
+  
+  `baseview`, `vizia` and `vizia_plug` are excluded from the workspace. After copying files into `vendor/`, `touch` them: cargo spots changes to path dependencies by file modification time, and `rsync -a`/`cp -p` keep the old times, which leaves a stale build in use.
+- nice-plug is pinned to one git rev in `Cargo.toml`, `xtask/Cargo.toml`, `vendor/vizia_plug/Cargo.toml` and `vendor/nice-plug-au2/Cargo.toml`. Keep them in step. Its `unsafe_flush_denormals` feature is on, because NIH-plug always flushed denormals and nice-plug only does so behind it.
 
 **Signal path** (`core/src/dsp/`). `Channel::process` runs one sample through the oversampler closure in this order:
 1. `Fet::process`, applying the reduction the detector asked for last, then `Preamp::process`. The preamp is linear for `Transistors::Bipolar` (Rev D, F) and a JFET square law inside a feedback loop for `Transistors::Jfet` (Rev A), solved in closed form (`amp::SquareLaw`, sized by `JFET_CURVE` and `JFET_CUTOFF`). Its curvature is oriented the same way as the Class A shaper's, because the chain from the preamp JFET to the output transistor doesn't invert.
@@ -80,15 +101,17 @@ The detector works in dB: demand = `limit(k · knee(level − threshold))`, then
 **Oversampler** (`dsp/oversample.rs`). A cascade of Kaiser halfband 2x stages. All stages are built up front and the factor selects how many are active, so changing the setting never allocates on the audio thread.
 
 **Editor** (`core/src/editor/`).
-- The window has a fixed logical size (`PANEL_W` × `WINDOW_H`), and every view is placed absolutely (`PositionType::SelfDirected`) from constants in `editor::layout` and `style.rs`.
+- The window has a fixed logical size (`PANEL_W` × `WINDOW_H`), and every view is placed absolutely (`PositionType::Absolute`) from constants in `editor::layout` and `style.rs`.
+- Drawing is Skia. `paint.rs` keeps the femtovg-style `Path`/`Paint` vocabulary the panel was written in; femtovg's box-gradient shadow is `paint::feathered_rect`, a blurred rounded rect. The typeface is Noto Sans, embedded from `assets/fonts` (`fonts.rs`).
+- State is Vizia 0.4 signals, not lenses: `UiState` has a `Signal` per field, and views read them through `cx.data::<UiState>()`. A `Binding` rebuilds when its signal changes. Calling `needs_redraw` on a Binding's own entity does nothing (Vizia skips binding views when collecting dirty areas), so a widget that must redraw on a signal marks its own entity. Widgets redraw on host automation through `RawParamEvent::ParametersChanged`.
 - `settings.rs` holds the header strip, the settings overlay, the preset menu and the dialogs. They are driven by the `UiState` model and `UiEvent`.
 - The custom widgets in `widgets.rs` are built on `ParamWidgetBase`. Any change the GUI makes to a parameter, including loading a preset, must go through a begin/set/end gesture so the host records it.
 - Text labels sit on top of the controls they annotate. They must be `.hoverable(false)` (see `label_box`), or they steal the clicks.
-- Images are PNGs embedded with `include_bytes!`. A `Sprite` is bound to its image bytes when it is created, and each widget owns its own, because an image id belongs to one canvas. A widget that shows two images needs two sprites (see `sprites::Cap`). The knob images are 48-frame vertical filmstrips in `assets/gen/`.
+- Images are PNGs embedded with `include_bytes!`. A `Sprite` is bound to its image bytes when it is created and decodes them on first draw; each widget owns its own. A widget that shows two images needs two sprites (see `sprites::Cap`). The knob images are 48-frame vertical filmstrips in `assets/gen/`, each frame read with a strict source rectangle so filtering never picks up the next frame.
 - The editor runs with `ViziaTheming::None`, and the only styling taken from a stylesheet is `style::STYLESHEET`: the text caret and the selection colour. Don't set `caret_color` inline: vizia blinks the caret by toggling a `caret` class, and an inline colour stops it blinking. Keep the sheet well-formed, because a single syntax error makes vizia silently drop the whole sheet; `the_stylesheet_is_well_formed` tests it.
-- `UiState::event` calls `baseview::set_text_input(dialog == Dialog::Name)` after every event, so on Windows the save dialog's name box receives the keyboard.
+- `UiState::event` emits `TextInputActive(dialog == Dialog::Name)` after every event, so on Windows the save dialog's name box receives the keyboard.
 - The VU needle is a spring and damper, advanced in fixed 1/240 s steps of elapsed time, so its speed doesn't depend on the frame rate.
-- Window scaling: `apply_scale` must write the persisted `ViziaState` scale *before* calling `request_resize`. `core/tests/scaling.rs` pins this behaviour.
+- Window scaling is GainStageFx's: a fixed base (`editor::BASE_DPI`, 1.5 physical pixels per panel unit) that 100 % renders at, every size in the menu relative to it (200 % is 3.0), and host DPI hints ignored. Choosing a size emits `WindowEvent::SetUserScale(size × base)`; the backend asks the host for the window and, once the window has its new size, sends `UserScaleChanged`, which is when `UiState` and the persisted `ViziaState` take the size on. A host that refuses leaves everything as it was. `core/tests/scaling.rs` and the render tests pin this.
 
 **Presets** (`core/src/presets.rs`).
 - Built-in presets are written as dial values and converted against the live parameters.
@@ -103,7 +126,8 @@ The detector works in dB: demand = `limit(k · knee(level − threshold))`, then
 - `core/tests/latency.rs`: the reported latency equals the real one at every factor; blending in the dry signal doesn't comb; power off keeps the timing.
 - `core/tests/threshold.rs`: the 1176LN manual's own ratio test (§13 of its calibration procedure), each button's threshold and knee, and the sidechain tap.
 - `the_built_in_presets_come_back_at_unity`: every built-in preset except Parallel Smash returns a −18 dBFS tone at unity. Anything that changes how hard a ratio works has to re-trim their output values.
-- `core/tests/scaling.rs`: window-size persistence.
+- `core/tests/scaling.rs`: window-size persistence, the 1.5 base, and the arithmetic of the zoom request.
+- `core/src/editor/render_tests.rs`: the real panel built and drawn headless through Skia at 50 %, 100 % and 200 %; every pixel covered; overlays, save-dialog typing and the zoom transaction following `UiState`.
 - `cargo run --release -p comp76fx_core --example bench -- --spec` checks against the published spec and prints the figures quoted in the README's measurement table. Re-run it and update the table when the DSP changes.
 
 ## Conventions

@@ -1,8 +1,8 @@
 //! Panel colours, geometry and the drawing primitives the widgets share.
 
+use super::paint::{self as vg, PanelCanvas};
 use crate::dsp::Finish;
-use nih_plug_vizia::vizia::prelude::{BoundingBox, Canvas};
-use nih_plug_vizia::vizia::vg;
+use vizia_plug::vizia::prelude::{BoundingBox, Canvas};
 
 /// The unit is a two rack unit panel; this is a little taller than that so the
 /// lettering stays readable.
@@ -83,17 +83,21 @@ impl Ink {
 }
 
 pub fn rgb(hex: u32) -> vg::Color {
-    vg::Color::rgb(
-        ((hex >> 16) & 0xff) as u8,
-        ((hex >> 8) & 0xff) as u8,
-        (hex & 0xff) as u8,
-    )
+    rgba(hex, 1.0)
 }
 
 pub fn rgba(hex: u32, alpha: f32) -> vg::Color {
-    let mut c = rgb(hex);
-    c.set_alphaf(alpha);
-    c
+    ink(
+        ((hex >> 16) & 0xff) as u8,
+        ((hex >> 8) & 0xff) as u8,
+        (hex & 0xff) as u8,
+        alpha,
+    )
+}
+
+/// A colour from its byte components, at an opacity from `0.0` to `1.0`.
+pub fn ink(r: u8, g: u8, b: u8, alpha: f32) -> vg::Color {
+    vg::Color::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, alpha)
 }
 
 /// Position on a circle, angles measured clockwise from twelve o'clock.
@@ -109,7 +113,7 @@ pub fn knob_angle(normalized: f32) -> f32 {
 /// The shadow a control casts on the panel. Every control sits in the same
 /// light, so the drawn ones and the rendered sprites share this rather than
 /// each carrying a shadow of its own.
-pub fn contact_shadow(canvas: &mut Canvas, cx: f32, cy: f32, r: f32) {
+pub fn contact_shadow(canvas: &Canvas, cx: f32, cy: f32, r: f32) {
     let mut path = vg::Path::new();
     path.ellipse(cx, cy + r * 0.16, r * 1.18, r * 1.12);
     canvas.fill_path(
@@ -128,35 +132,37 @@ pub fn contact_shadow(canvas: &mut Canvas, cx: f32, cy: f32, r: f32) {
 /// The shadow a rectangular part casts on the panel: a button bezel or the
 /// meter's case. The offset is downward because the light is above, and the
 /// feather is what stops it reading as a drawn outline.
-pub fn cast_shadow(canvas: &mut Canvas, b: BoundingBox, scale: f32, spread: f32, radius: f32) {
+///
+/// Held to the same outline it always had, `spread` past the part, so the
+/// shadow ends where it did when femtovg drew it as a box gradient.
+pub fn cast_shadow(canvas: &Canvas, b: BoundingBox, scale: f32, spread: f32, radius: f32) {
     let drop = spread * 0.45;
-    let mut path = vg::Path::new();
-    path.rounded_rect(
+    let mut outline = vg::Path::new();
+    outline.rounded_rect(
         b.x - spread,
         b.y - spread + drop,
         b.w + spread * 2.0,
         b.h + spread * 2.0,
         radius + spread,
     );
-    canvas.fill_path(
-        &path,
-        &vg::Paint::box_gradient(
-            b.x,
-            b.y + drop,
-            b.w,
-            b.h,
-            radius,
-            spread * scale.max(1.0),
-            rgba(0x000000, 0.55),
-            rgba(0x000000, 0.0),
-        ),
+    canvas.clip_to_path(&outline);
+    vg::feathered_rect(
+        canvas,
+        b.x,
+        b.y + drop,
+        b.w,
+        b.h,
+        radius,
+        spread * scale.max(1.0),
+        rgba(0x000000, 0.55),
     );
+    canvas.restore();
 }
 
 /// A tick engraved into the panel around a knob.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_tick(
-    canvas: &mut Canvas,
+    canvas: &Canvas,
     cx: f32,
     cy: f32,
     inner: f32,
@@ -174,12 +180,10 @@ pub fn draw_tick(
     // so a scale cut into aluminium reads the same way as one screened onto
     // black: dark line, light edge, or the other way round.
     let (rr, rg, rb, ra) = ink.relief;
-    let mut under = vg::Color::rgb(rr, rg, rb);
-    under.set_alphaf(ra as f32 / 255.0 * 0.85);
+    let under = self::ink(rr, rg, rb, ra as f32 / 255.0 * 0.85);
     canvas.stroke_path(&path, &vg::Paint::color(under).with_line_width(width * 2.0));
     let (tr, tg, tb) = ink.text;
-    let mut over = vg::Color::rgb(tr, tg, tb);
-    over.set_alphaf(0.9);
+    let over = self::ink(tr, tg, tb, 0.9);
     canvas.stroke_path(&path, &vg::Paint::color(over).with_line_width(width));
 }
 

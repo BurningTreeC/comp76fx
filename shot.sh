@@ -3,18 +3,27 @@
 # DPI scale and the third the revision, so
 #   ./shot.sh doc/panel.png 1.5 d
 # grabs the Rev D panel at one and a half times its own coordinates -- 1680 x
-# 441 rather than the 1120 x 294 the window opens at. The panel is drawn rather
-# than pictured, so the lettering is sharp at any scale, but the pictures in it
-# are not: the knob renders are 208 and 176 pixel frames drawn about 100 and 80
-# across, and the switch caps are 119 to 127 pixels drawn about 50 tall, so they
-# hold up to about two; the meter photograph to about three. Targets the window
-# by address and refuses to act unless the focus actually landed on it -- a
-# title selector that finds nothing falls back to whatever is focused, which is
-# how a terminal ended up floated across the screen.
+# 441 for the panel's 1120 x 294. That is the only scale it can take: the panel
+# opens at 100 %, which is 1.5 (`editor::BASE_DPI`), and the standalone has no
+# session to start it at another size from -- nice-plug's `--dpi-scale` is
+# accepted and ignored, and the fixed base ignores DPI hints anyway.
+#
+# The panel is drawn rather than pictured, so the lettering is sharp at any
+# scale, but the pictures in it are not: the knob renders are 208 and 176 pixel
+# frames drawn about 100 and 80 across, and the switch caps are 119 to 127
+# pixels drawn about 50 tall, so they hold up to about two; the meter
+# photograph to about three. Targets the window by address and refuses to act
+# unless the focus actually landed on it -- a title selector that finds nothing
+# falls back to whatever is focused, which is how a terminal ended up floated
+# across the screen.
 set -euo pipefail
 out=${1:?usage: shot.sh <output.png> [dpi-scale] [a|d|f]}
-dpi=${2:-1}
+dpi=${2:-1.5}
 rev=${3:-d}
+if [ "$dpi" != 1.5 ]; then
+    echo "shot.sh: the panel always opens at 100 %, which is a DPI scale of 1.5, not '$dpi'" >&2
+    exit 2
+fi
 case "$rev" in
     a | d | f) ;;
     *)
@@ -34,7 +43,7 @@ cargo build --release --quiet --manifest-path "$project_dir/Cargo.toml" \
 
 pkill -x "$bin" 2>/dev/null || true
 sleep 0.5
-XDG_CONFIG_HOME="${SHOT_CONFIG:-$HOME/.config}" "$project_dir/target/release/$bin" --backend dummy --dpi-scale "$dpi" >/dev/null 2>&1 &
+XDG_CONFIG_HOME="${SHOT_CONFIG:-$HOME/.config}" "$project_dir/target/release/$bin" --backend dummy >/dev/null 2>&1 &
 sleep 3
 
 addr=$(hyprctl clients -j | python3 -c "

@@ -15,6 +15,7 @@ export_revision! {
     name: "Comp76Fx Rev D",
     clap_id: "com.burningtreec.comp76fx.rev-d",
     vst3_id: b"Comp76Fx-RevD-01",
+    au2_subtype: b"C76D",
     description: "Blackface FET limiting amplifier with low noise circuitry",
     revision: REV_D,
 }

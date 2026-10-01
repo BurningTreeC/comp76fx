@@ -15,6 +15,7 @@ export_revision! {
     name: "Comp76Fx Rev F",
     clap_id: "com.burningtreec.comp76fx.rev-f",
     vst3_id: b"Comp76Fx-RevF-01",
+    au2_subtype: b"C76F",
     description: "Blackface FET limiting amplifier with a push-pull output stage",
     revision: REV_F,
 }

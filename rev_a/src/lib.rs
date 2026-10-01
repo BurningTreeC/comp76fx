@@ -16,6 +16,7 @@ export_revision! {
     name: "Comp76Fx Rev A",
     clap_id: "com.burningtreec.comp76fx.rev-a",
     vst3_id: b"Comp76Fx-RevA-01",
+    au2_subtype: b"C76A",
     description: "Bluestripe FET limiting amplifier, the original circuit",
     revision: REV_A,
 }

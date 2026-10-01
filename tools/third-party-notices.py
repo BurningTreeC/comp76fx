@@ -17,7 +17,15 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
 OUTPUT = PROJECT / "THIRD-PARTY-NOTICES.md"
-TARGET = "x86_64-unknown-linux-gnu"
+# Every platform a release archive is built for. Each archive ships this one
+# file, so it lists what any of them links: the Windows backend's crates, and
+# on macOS the Audio Unit wrapper's, are not in the Linux build.
+TARGETS = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
 
 # Licence files are found by name; these are the ones crates.io crates use.
 LICENCE_FILES = re.compile(r"^(LICEN[SC]E|COPYING|NOTICE|UNLICENSE)", re.IGNORECASE)
@@ -74,9 +82,9 @@ NOT_A_NOTICE = re.compile(
 HAS_YEAR = re.compile(r"(19|20)\d{2}")
 
 
-def metadata():
+def metadata(target):
     raw = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--filter-platform", TARGET],
+        ["cargo", "metadata", "--format-version", "1", "--filter-platform", target],
         cwd=PROJECT,
         capture_output=True,
         text=True,
@@ -150,7 +158,12 @@ def licence_texts(package):
 
     if not texts:
         # A workspace member inherits the licence sitting at the workspace root.
+        # Not this project's root, though: the only crates under it that get
+        # this far are vendored ones, and the GPL in `LICENSE` is this
+        # project's, not theirs.
         for parent in list(source.parents)[:3]:
+            if parent == PROJECT:
+                break
             for path in sorted(parent.glob("*")):
                 if path.is_file() and LICENCE_FILES.match(path.name):
                     text = read(path)
@@ -233,9 +246,12 @@ def canonical_bodies(packages):
 
 
 def main():
-    meta = metadata()
+    linked = {}
+    for target in TARGETS:
+        for package in linked_packages(metadata(target)):
+            linked[package["id"]] = package
     packages = sorted(
-        linked_packages(meta), key=lambda p: (p["name"].lower(), p["version"])
+        linked.values(), key=lambda p: (p["name"].lower(), p["version"])
     )
 
     groups = {}
@@ -255,6 +271,23 @@ def main():
         "takes is named alongside it, and that is the text reproduced below.",
         "",
         "Regenerate this file with `python3 tools/third-party-notices.py`.",
+        "",
+        "## Bundled fonts and native renderer",
+        "",
+        (PROJECT / "assets/fonts/NOTICE").read_text().strip(),
+        "",
+        "The font licence travels with the fonts, so it is reproduced here:",
+        "",
+        "```",
+        (PROJECT / "assets/fonts/LICENSE-OFL").read_text().strip(),
+        "```",
+        "",
+        "Skia is used by the Vizia renderer through rust-skia. Its native library",
+        "has the following license (separate from the Rust bindings):",
+        "",
+        "```",
+        (PROJECT / "assets/licenses/LICENSE_SKIA").read_text().strip(),
+        "```",
         "",
         "## Crates",
         "",
@@ -284,8 +317,8 @@ def main():
         needed_now.update(bundled(package, licence_texts(package)))
     out.append("## License texts")
     out.append("")
-    out.append("The GPLv3, which covers both this plugin and the `vst3-sys` crate,")
-    out.append("is in `LICENSE` rather than repeated here.")
+    out.append("The GPLv3, which covers this plugin, is in `LICENSE` rather than")
+    out.append("repeated here.")
     out.append("")
     # The GPL text lives in LICENSE, so it is not repeated here.
     skip = {"GPLv3", "GPL-3.0", "GPL-3.0-or-later"}

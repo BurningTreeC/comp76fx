@@ -1,21 +1,25 @@
 [workspace]
 resolver = "2"
-members = ["core", "installer", "rev_a", "rev_d", "rev_f", "xtask"]
-exclude = ["vendor/baseview"]
+members = ["core", "installer", "rev_a", "rev_d", "rev_f", "xtask", "vendor/nice-plug-au2"]
+# Vendored with workspaces of their own. They are built as path dependencies
+# of this one, never as members of it.
+exclude = ["vendor/baseview", "vendor/vizia", "vendor/vizia_plug"]
 
 [workspace.package]
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 authors = ["Simon Huber <huber.simon@protonmail.com>"]
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23" }
-nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23" }
-# The GUI backend vizia uses, which the patch below points at
-# `vendor/baseview`. Named directly only for its text-entry switch, which tells
-# it on Windows that the preset-name box wants the keyboard.
-baseview = { git = "https://github.com/RustAudio/baseview.git", rev = "2c1b1a7b0fef1a29a5150a6a8f6fef6a0cbab8c4" }
+# nih-plug used to flush denormals on every process call; nice-plug only does
+# so behind this feature. The release stages and the detector decay towards
+# zero for as long as the input is silent, which is exactly where denormals
+# appear.
+nice-plug = { git = "https://codeberg.org/RustAudio/nice-plug", rev = "e60b5db09d8606c3dc3e93f982847a00bce17325", features = ["unsafe_flush_denormals"] }
+# The Vizia 0.4 adapter, ported to this nice-plug. See vendor/vizia_plug/PATCHES.md.
+vizia_plug = { path = "vendor/vizia_plug" }
+nice-plug-au2 = { path = "vendor/nice-plug-au2" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 comp76fx_core = { path = "core" }
@@ -25,6 +29,7 @@ lto = "thin"
 strip = "symbols"
 opt-level = 3
 
-# Preserve the pinned GUI backend, with Windows input and resize fixes vendored.
-[patch."https://github.com/RustAudio/baseview.git"]
+# One audited window backend shared by Vizia and its plugin adapter, with the
+# Windows input/resize and X11 frame fixes in vendor/baseview/PATCHES.md.
+[patch.crates-io]
 baseview = { path = "vendor/baseview" }
