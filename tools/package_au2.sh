@@ -88,8 +88,14 @@ package() {
     # And so must this revision's own Cocoa view factory, or the host finds
     # no editor. Its name is only in the binary if the class is: nothing in
     # Rust spells it, and the class is not an exported symbol nm could show.
-    local factory="NiceAu2CocoaViewFactory_${crate}"
-    if ! strings -a "${clap_binary}" | grep -qx "${factory}"; then
+    #
+    # The strings are collected first rather than piped into `grep -q`. That
+    # stops reading at the first match, `strings` then fails writing the rest,
+    # and under pipefail a class that was found reads as missing -- which is
+    # how the first macOS build failed.
+    local factory="NiceAu2CocoaViewFactory_${crate}" names
+    names="$(strings -a "${clap_binary}")"
+    if ! grep -qxF "${factory}" <<<"${names}"; then
         echo "error: the Cocoa view factory ${factory} is missing from ${clap_binary}" >&2
         exit 1
     fi
